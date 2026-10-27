@@ -1,0 +1,18 @@
+# --- Construction (se régénère avec la commande du README) ---
+build/
+dist/
+dist-*/
+__pycache__/
+*.pyc
+
+# Anciens outils de construction (UPX n'est plus utilisé, voir le README)
+tools/
+
+# --- Documents personnels : aucun PDF de travail n'est publié ---
+*.pdf
+*.zip
+test.txt
+
+# --- Fichiers système ---
+Thumbs.db
+desktop.ini
