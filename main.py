@@ -612,6 +612,7 @@ class PageWidget(QWidget):
         self.hovered = None
         self.hovered_field = None
         self.editor = None
+        self.font_warning = None  # bandeau « police non installée » sous la zone d'édition
         self.highlights = []  # occurrences de la recherche (rectangles affichés, en points PDF)
         self.current_highlight = None
         # Image en cours de placement : {"image": QImage, "rect": [x0, y0, x1, y1] en points affichés}.
@@ -927,6 +928,39 @@ class PageWidget(QWidget):
         font.setItalic(bool(span["flags"] & pymupdf.TEXT_FONT_ITALIC))
 
         self._open_line_editor(rect, font, span["text"], lambda text: self.span_edited.emit(self.index, span, text))
+        self._warn_missing_font(span, rect)
+
+    def _warn_missing_font(self, span, rect):
+        """Bandeau sous la zone d'édition si la police du texte n'est pas installée sur ce PC.
+
+        La saisie s'affiche alors dans une police de remplacement (Qt n'a pas la police), et le texte
+        écrit dépendra de la version intégrée au PDF, souvent réduite aux seules lettres déjà présentes.
+        """
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            path, _substitute = find_system_font(span)  # équivalent standard (Helvetica -> Arial) accepté
+        finally:
+            QApplication.restoreOverrideCursor()
+        if path:
+            return
+        name = span["font"].split("+", 1)[-1]
+        warning = QLabel(f"⚠ Police « {name} » non installée sur ce PC : la saisie s'affiche dans une autre "
+                         "police. Le texte sera écrit avec la police intégrée au PDF si elle contient vos lettres, "
+                         "sinon avec une police proche.", self)
+        warning.setTextFormat(Qt.TextFormat.PlainText)
+        warning.setWordWrap(True)
+        warning.setStyleSheet("background: #fef3c7; color: #92400e; border: 1px solid #f59e0b; "
+                              "border-radius: 4px; padding: 4px 8px;")
+        width = min(max(rect.width(), 360), self.width())
+        warning.setFixedWidth(width)
+        warning.adjustSize()
+        x = max(0, min(rect.left(), self.width() - width))
+        y = rect.bottom() + 4
+        if y + warning.height() > self.height():  # en bas de page : au-dessus de la zone d'édition
+            y = rect.top() - warning.height() - 4
+        warning.move(x, y)
+        warning.show()
+        self.font_warning = warning
 
     def _open_line_editor(self, rect, font, text, on_commit):
         """Champ de saisie posé sur la page ; on_commit(texte) est appelé si le texte a changé."""
@@ -954,6 +988,10 @@ class PageWidget(QWidget):
             editor.blockSignals(True)
             editor.hide()
             editor.deleteLater()
+        if self.font_warning is not None:
+            warning, self.font_warning = self.font_warning, None
+            warning.hide()
+            warning.deleteLater()
 
 
 class PagesContainer(QWidget):
