@@ -54,6 +54,25 @@ d'autres PC, les antivirus bloquaient les DLL compressées et l'application ne d
 
 L'icône `PDF Toolkit 2.ico` est générée par `python make_icon.py` (à relancer seulement si son dessin change).
 
+Les exécutables publiés sont construits par GitHub Actions (`.github/workflows/build.yml`) à partir du code de ce
+dépôt, avec les versions de `requirements-build.txt` : il suffit de pousser une étiquette `v1.1`, `v1.2`… pour
+construire, signer et publier une nouvelle Release.
+
+## Politique de signature du code
+
+Signature de code gratuite fournie par [SignPath.io](https://about.signpath.io/), certificat par
+[SignPath Foundation](https://signpath.org/).
+*(Free code signing provided by SignPath.io, certificate by SignPath Foundation.)*
+
+- **Contributeurs et relecteurs** : [Yannick Buchet](https://github.com/yannickbuchet-ctrl)
+- **Approbateur des signatures** : [Yannick Buchet](https://github.com/yannickbuchet-ctrl)
+
+Seuls les exécutables construits par GitHub Actions à partir du code public de ce dépôt sont signés.
+
+**Confidentialité** : ce programme ne transmet aucune information à d'autres systèmes en réseau, sauf demande
+expresse de l'utilisateur. *(This program will not transfer any information to other networked systems unless
+specifically requested by the user or the person installing or operating it.)*
+
 ## Fichiers
 
 | Fichier | Rôle |
@@ -61,6 +80,8 @@ L'icône `PDF Toolkit 2.ico` est générée par `python make_icon.py` (à relanc
 | `main.py` | l'application |
 | `make_icon.py` | génère l'icône de l'exécutable |
 | `PDF Toolkit 2.spec` | recette de construction de l'exécutable (PyInstaller) |
+| `requirements-build.txt` | versions des outils de construction |
+| `.github/workflows/build.yml` | construction, signature et publication automatiques |
 | `PDF Toolkit 2.ico` | icône |
 | `captures/` | captures d'écran de ce README |
 
