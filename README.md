@@ -10,6 +10,10 @@ remplir les formulaires, signer, protéger par mot de passe et compresser vos do
 - **Ouvrir, enregistrer, imprimer** : ouverture par le menu ou par glisser-déposer d'un PDF dans la fenêtre.
 - **Modifier le texte** : cliquez sur un texte pour le réécrire ; la police d'origine est conservée quand c'est
   possible (police intégrée au PDF ou installée sur l'ordinateur).
+- **Police d'origine non installée** : un avertissement s'affiche sous le texte en cours d'édition. La fenêtre
+  « Infos sur la police » donne tout ce que le PDF en dit (nom exact, style, version, éditeur, créateur, sites,
+  licence, lettres disponibles dans le PDF) et des boutons pour la rechercher sur Internet ou sur Google Fonts ;
+  une fois installée, elle est prise en compte sans redémarrer.
 - **Rechercher et remplacer** : toutes les occurrences sont surlignées, remplacement une par une ou en une fois.
 - **Concaténer des PDF** : assemblez plusieurs fichiers dans l'ordre de votre choix ; un PDF glissé sur le document
   ouvert est ajouté à la fin.

@@ -1,14 +1,16 @@
 import glob
 import hashlib
+import html
 import os
 import re
+import struct
 import sys
 
 import pymupdf
-from PySide6.QtCore import QByteArray, QMimeData, QPoint, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, QMimeData, QPoint, QRectF, QSize, Qt, QTimer, QUrl, QUrlQuery, Signal
 from PySide6.QtGui import (
-    QAction, QColor, QDrag, QFont, QIcon, QImage, QKeySequence, QLinearGradient, QPageLayout, QPainter,
-    QPainterPath, QPen, QPixmap, QTransform,
+    QAction, QColor, QDesktopServices, QDrag, QFont, QFontDatabase, QIcon, QImage, QKeySequence, QLinearGradient,
+    QPageLayout, QPainter, QPainterPath, QPen, QPixmap, QTransform,
 )
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
@@ -431,6 +433,82 @@ def generic_system_font(name, italic):
     return by_style.get((family, bold, italic)) or by_style.get((family, bold, False)) or by_style.get((family, False, False))
 
 
+def refresh_system_fonts():
+    """Oublie l'index des polices installées : une police installée entre-temps sera trouvée."""
+    global _system_fonts
+    _system_fonts = None
+
+
+_qt_families = {}  # fichier de police -> famille déclarée à Qt
+
+
+def qt_font_family(path):
+    """Famille Qt d'une police installée (déclarée à Qt si besoin : une police installée après le
+    lancement de l'application n'est pas connue de Qt). Renvoie None si le fichier est illisible."""
+    if path not in _qt_families:
+        families = QFontDatabase.applicationFontFamilies(QFontDatabase.addApplicationFont(path))
+        _qt_families[path] = families[0] if families else None
+    return _qt_families[path]
+
+
+def font_names(buffer):
+    """Textes de la table « name » d'une police TrueType / OpenType : {numéro: texte}.
+
+    1 famille, 2 style, 4 nom complet, 5 version, 6 nom PostScript, 8 éditeur, 9 créateur,
+    11 site de l'éditeur, 12 site du créateur, 13 licence, 14 lien de la licence, 0 copyright,
+    16 / 17 famille et style typographiques. Le texte anglais de Windows est préféré.
+    Renvoie {} pour une police sans cette table (Type 1, CFF seule).
+    """
+    data = bytes(buffer)
+    try:
+        start = struct.unpack(">I", data[12:16])[0] if data[:4] == b"ttcf" else 0
+        if data[start:start + 4] not in (b"\x00\x01\x00\x00", b"OTTO", b"true"):
+            return {}
+        count = struct.unpack(">H", data[start + 4:start + 6])[0]
+        for i in range(count):
+            tag, _checksum, table, _length = struct.unpack(">4sIII", data[start + 12 + 16 * i:start + 28 + 16 * i])
+            if tag == b"name":
+                break
+        else:
+            return {}
+        _format, records, strings = struct.unpack(">HHH", data[table:table + 6])
+        names, ranks = {}, {}
+        for i in range(records):
+            platform, encoding, language, name_id, length, offset = struct.unpack(
+                ">HHHHHH", data[table + 6 + 12 * i:table + 18 + 12 * i])
+            raw = data[table + strings + offset:table + strings + offset + length]
+            if platform in (0, 3):
+                text, rank = raw.decode("utf-16-be", "replace"), 0 if language == 0x0409 else 1
+            elif platform == 1 and encoding == 0:
+                text, rank = raw.decode("mac_roman", "replace"), 2
+            else:
+                continue
+            text = text.strip().strip("\x00")
+            if text and rank < ranks.get(name_id, 9):
+                names[name_id], ranks[name_id] = text, rank
+        return names
+    except (struct.error, IndexError):
+        return {}
+
+
+def readable_font_name(name):
+    """Nom lisible d'une police d'après son nom dans le PDF : (famille, style).
+
+    "ABCDEF+WorkSans-MediumItalic" -> ("Work Sans", "Medium Italic") ;
+    "TimesNewRomanPS-BoldMT" -> ("Times New Roman", "Bold") ; "Arial,Bold" -> ("Arial", "Bold").
+    """
+    name = name.split("+", 1)[-1]
+    family, _, style = name.partition("-")
+    if not style:
+        family, _, style = family.partition(",")
+    family, style = re.sub(r"(PS|MT)$", "", family), re.sub(r"MT$", "", style)
+
+    def spaced(text):
+        return re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", " ", text).strip()
+
+    return spaced(family), spaced(style)
+
+
 # Ligne « <glyphe> <00A0> » d'une table ToUnicode (et non une plage, ni un numéro de glyphe 00A0).
 NBSP_MAPPING = re.compile(rb"^(<[0-9A-Fa-f]{2,4}>[ \t]+)<00[Aa]0>([ \t]*)$", re.MULTILINE)
 
@@ -592,6 +670,7 @@ class InlineEditor(QLineEdit):
 
 class PageWidget(QWidget):
     span_edited = Signal(int, object, str)
+    font_info_requested = Signal(int, object)  # page, texte dont la police n'est pas installée
     field_edited = Signal(int, int, object)  # page, xref du champ de formulaire, nouvelle valeur
     image_placed = Signal(int, object)  # page, rectangle affiché (en points) de l'image placée
     placement_cancelled = Signal(int)
@@ -922,32 +1001,38 @@ class PageWidget(QWidget):
         rect = self._span_rect(span).adjusted(-3, -3, 3, 3).toAlignedRect()
         rect.setWidth(max(rect.width() + 60, 120))
 
-        font = QFont(span["font"].split("+", 1)[-1].split("-")[0].split(",")[0])
-        font.setPixelSize(max(6, round(span["size"] * self.zoom)))
-        font.setBold(bool(span["flags"] & pymupdf.TEXT_FONT_BOLD))
-        font.setItalic(bool(span["flags"] & pymupdf.TEXT_FONT_ITALIC))
-
-        self._open_line_editor(rect, font, span["text"], lambda text: self.span_edited.emit(self.index, span, text))
-        self._warn_missing_font(span, rect)
-
-    def _warn_missing_font(self, span, rect):
-        """Bandeau sous la zone d'édition si la police du texte n'est pas installée sur ce PC.
-
-        La saisie s'affiche alors dans une police de remplacement (Qt n'a pas la police), et le texte
-        écrit dépendra de la version intégrée au PDF, souvent réduite aux seules lettres déjà présentes.
-        """
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             path, _substitute = find_system_font(span)  # équivalent standard (Helvetica -> Arial) accepté
         finally:
             QApplication.restoreOverrideCursor()
-        if path:
-            return
-        name = span["font"].split("+", 1)[-1]
-        warning = QLabel(f"⚠ Police « {name} » non installée sur ce PC : la saisie s'affiche dans une autre "
-                         "police. Le texte sera écrit avec la police intégrée au PDF si elle contient vos lettres, "
-                         "sinon avec une police proche.", self)
-        warning.setTextFormat(Qt.TextFormat.PlainText)
+        # Police installée : la saisie s'affiche dans cette police même (Qt ne la retrouve pas toujours d'après
+        # le nom du PDF, « WorkSans » pour « Work Sans »).
+        family = (qt_font_family(path) if path else None) or span["font"].split("+", 1)[-1].split("-")[0].split(",")[0]
+        font = QFont(family)
+        font.setPixelSize(max(6, round(span["size"] * self.zoom)))
+        font.setBold(bool(span["flags"] & pymupdf.TEXT_FONT_BOLD))
+        font.setItalic(bool(span["flags"] & pymupdf.TEXT_FONT_ITALIC))
+
+        self._open_line_editor(rect, font, span["text"], lambda text: self.span_edited.emit(self.index, span, text))
+        if not path:
+            self._warn_missing_font(span, rect)
+
+    def _warn_missing_font(self, span, rect):
+        """Bandeau sous la zone d'édition : la police du texte n'est pas installée sur ce PC.
+
+        La saisie s'affiche alors dans une police de remplacement, et le texte écrit dépendra de la version
+        intégrée au PDF, souvent réduite aux seules lettres déjà présentes. Le lien « Infos sur la police »
+        donne tout ce qu'il faut pour la retrouver et l'installer.
+        """
+        family, style = readable_font_name(span["font"])
+        name = html.escape(f"{family} {style}".strip())
+        warning = QLabel(f"⚠ Police « <b>{name}</b> » non installée sur ce PC : la saisie s'affiche dans une autre "
+                         "police, et le texte sera écrit avec la police intégrée au PDF si elle contient vos "
+                         "lettres, sinon avec une police proche. <a href='infos'>Infos sur la police…</a> "
+                         "pour la retrouver et l'installer.", self)
+        warning.setTextFormat(Qt.TextFormat.RichText)
+        warning.linkActivated.connect(lambda _link: self.font_info_requested.emit(self.index, span))
         warning.setWordWrap(True)
         warning.setStyleSheet("background: #fef3c7; color: #92400e; border: 1px solid #f59e0b; "
                               "border-radius: 4px; padding: 4px 8px;")
@@ -1167,6 +1252,137 @@ class CompressDialog(QDialog):
 
     def remember(self):
         return self.remember_box.isChecked()
+
+
+class FontInfoDialog(QDialog):
+    """Tout ce que l'on sait de la police d'origine d'un texte, pour la retrouver sur Internet et l'installer :
+    modifier le texte avec cette police, et non une police de remplacement, demande qu'elle soit installée."""
+
+    INSTALLED = 2  # code de retour : l'utilisateur indique avoir installé la police
+
+    def __init__(self, info, parent=None):
+        super().__init__(parent)
+        self.info = info
+        self.setWindowTitle("Police d'origine")
+        names = info["names"]
+        layout = QVBoxLayout(self)
+
+        title = QLabel(f"{info['family']} — {info['style']}")
+        title.setStyleSheet("font-size: 13pt; font-weight: 600;")
+        title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(title)
+        hint = QLabel("Cette police n'est pas installée sur ce PC. Pour modifier le texte avec sa police d'origine, "
+                      "installez-la : les informations ci-dessous, lues dans le PDF, aident à trouver exactement "
+                      "la bonne (même famille, même style).")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        layout.addSpacing(4)
+
+        if not info["embedded"]:
+            in_pdf = ("Non intégrée au PDF : le document compte sur la police installée de l'ordinateur qui "
+                      "l'affiche.")
+        elif info["subset"]:
+            letters = info["letters"]
+            shown = " ".join(letters) if len(letters) <= 80 else " ".join(letters[:80]) + " …"
+            in_pdf = (f"Intégrée au PDF, mais réduite aux {len(letters)} caractères utilisés dans le document : "
+                      "sans la police installée, seuls ceux-ci peuvent être écrits dans la police d'origine "
+                      f"(les autres sont pris dans une police proche).\n{shown}")
+        else:
+            in_pdf = "Intégrée au PDF en entier : tous ses caractères peuvent être écrits."
+        rows = [
+            ("Nom exact", names.get(6) or info["pdf_name"]),
+            ("Famille", info["family"]),
+            ("Style", info["style"]),
+            ("Nom complet", names.get(4)),
+            ("Version", names.get(5)),
+            ("Éditeur", names.get(8)),
+            ("Créateur", names.get(9)),
+            ("Site de l'éditeur", names.get(11)),
+            ("Site du créateur", names.get(12)),
+            ("Licence", names.get(13)),
+            ("Lien de la licence", names.get(14)),
+            ("Copyright", names.get(0)),
+            ("Dans ce PDF", in_pdf),
+        ]
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(6)
+        for row, (label, value) in enumerate((label, value) for label, value in rows if value):
+            if len(value) > 400:  # texte de licence complet : le début suffit, le lien donne le reste
+                value = value[:400].rsplit(" ", 1)[0] + "…"
+            key = QLabel(label)
+            key.setObjectName("hint")
+            key.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+            if re.match(r"^(https?://|www\.)\S+$", value):
+                url = value if value.startswith("http") else "https://" + value
+                text = QLabel(f"<a href='{html.escape(url, quote=True)}'>{html.escape(value)}</a>")
+                text.setOpenExternalLinks(True)
+            else:
+                text = QLabel(value)
+                text.setTextFormat(Qt.TextFormat.PlainText)
+            text.setWordWrap(True)
+            text.setTextInteractionFlags(text.textInteractionFlags() | Qt.TextInteractionFlag.TextSelectableByMouse)
+            grid.addWidget(key, row, 0)
+            grid.addWidget(text, row, 1)
+        grid.setColumnStretch(1, 1)
+        layout.addLayout(grid)
+        layout.addSpacing(8)
+
+        steps = QLabel(
+            "<b>Pour l'installer :</b><ol style='margin-left:-20px'>"
+            "<li>Recherchez-la avec les boutons ci-dessous. Beaucoup de polices sont gratuites (Google Fonts…), "
+            "d'autres payantes : vérifiez la licence.</li>"
+            "<li>Téléchargez le fichier <b>.ttf</b> ou <b>.otf</b> du bon style, ouvrez-le et cliquez sur "
+            "<b>Installer</b>.</li>"
+            "<li>Revenez ici et cliquez sur <b>J'ai installé la police</b> : inutile de redémarrer.</li></ol>")
+        steps.setWordWrap(True)
+        layout.addWidget(steps)
+
+        search = QHBoxLayout()
+        for text, slot in (("Copier le nom", self._copy_name), ("Rechercher sur Internet", self._search_web),
+                           ("Chercher sur Google Fonts", self._search_google_fonts)):
+            button = QPushButton(text)
+            button.clicked.connect(slot)
+            search.addWidget(button)
+        if names.get(11) or names.get(12):
+            button = QPushButton("Site de l'éditeur")
+            button.clicked.connect(lambda: self._open(names.get(11) or names.get(12)))
+            search.addWidget(button)
+        search.addStretch(1)
+        layout.addLayout(search)
+
+        buttons = QDialogButtonBox()
+        installed = buttons.addButton("J'ai installé la police", QDialogButtonBox.ButtonRole.AcceptRole)
+        set_primary(installed)
+        installed.clicked.connect(lambda: self.done(self.INSTALLED))
+        buttons.addButton("Fermer", QDialogButtonBox.ButtonRole.RejectRole).clicked.connect(self.reject)
+        layout.addWidget(buttons)
+        self.setMinimumWidth(560)
+
+    def _search_text(self):
+        return f"{self.info['family']} {self.info['style']}".strip()
+
+    def _copy_name(self):
+        QApplication.clipboard().setText(self._search_text())
+
+    @staticmethod
+    def _open(url):
+        QDesktopServices.openUrl(QUrl(url if url.startswith("http") else "https://" + url))
+
+    def _search_web(self):
+        url = QUrl("https://www.google.com/search")
+        query = QUrlQuery()
+        query.addQueryItem("q", f'"{self.info["family"]}" {self.info["style"]} font')
+        url.setQuery(query)
+        QDesktopServices.openUrl(url)
+
+    def _search_google_fonts(self):
+        url = QUrl("https://fonts.google.com/")
+        query = QUrlQuery()
+        query.addQueryItem("query", self.info["family"])
+        url.setQuery(query)
+        QDesktopServices.openUrl(url)
 
 
 class PasswordDialog(QDialog):
@@ -2196,6 +2412,7 @@ class PdfEditor(QMainWindow):
         for i in range(len(self.doc)):
             widget = PageWidget(i)
             widget.span_edited.connect(self.edit_span)
+            widget.font_info_requested.connect(self.show_font_info)
             widget.field_edited.connect(self.edit_field)
             widget.image_placed.connect(self.place_image)
             widget.placement_cancelled.connect(self.cancel_image)
@@ -2334,6 +2551,63 @@ class PdfEditor(QMainWindow):
         if generic:
             chain.append((read(generic), f"police proche : {pymupdf.Font(fontfile=generic).name}", False))
         return chain
+
+    def font_info(self, page_index, span):
+        """Ce que le PDF dit de la police d'un texte : noms, éditeur, licence, intégration (voir FontInfoDialog)."""
+        target = normalize_font_name(span["font"])
+        info = {"pdf_name": span["font"].split("+", 1)[-1], "embedded": False, "letters": 0, "names": {},
+                "subset": bool(re.match(r"^[A-Z]{6}\+", span["font"]))}
+        for xref, ext, _type, basefont, *_ in self.doc.get_page_fonts(page_index):
+            if normalize_font_name(basefont) != target:
+                continue
+            info["subset"] = info["subset"] or bool(re.match(r"^[A-Z]{6}\+", basefont))
+            try:
+                buffer = self.doc.extract_font(xref)[3] if ext != "n/a" else None
+            except Exception:
+                buffer = None
+            if buffer:
+                info["embedded"] = True
+                info["names"] = font_names(buffer)
+            break
+        # Caractères écrits dans tout le document avec cette police : ceux qu'une police réduite contient
+        # (son contenu ne le dit pas toujours : les polices Type0 réduites n'ont plus de table de caractères).
+        used = set()
+        for page in self.doc:
+            for block in page.get_text("dict")["blocks"]:
+                for line in block.get("lines", []):
+                    for other in line["spans"]:
+                        if normalize_font_name(other["font"]) == target:
+                            used.update(ch for ch in other["text"] if not ch.isspace())
+        info["letters"] = "".join(sorted(used))
+        family, style = readable_font_name(span["font"])
+        names = info["names"]
+        info["family"] = names.get(16) or names.get(1) or family
+        info["style"] = names.get(17) or names.get(2) or style or "Regular"
+        return info
+
+    def show_font_info(self, page_index, span):
+        """Fenêtre « Police d'origine » ; si l'utilisateur a installé la police, elle est prise en compte."""
+        info = self.font_info(page_index, span)
+        if FontInfoDialog(info, self).exec() != FontInfoDialog.INSTALLED:
+            return
+        refresh_system_fonts()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            path, _substitute = find_system_font(span)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if path:
+            # La zone d'édition se rouvre dans la police installée, et le texte sera écrit avec elle.
+            self.pages[page_index].open_editor(span)
+            self.statusBar().showMessage(
+                f"Police « {info['family']} {info['style']} » trouvée ({os.path.basename(path)}) : "
+                "le texte sera écrit avec elle.", 10000)
+        else:
+            QMessageBox.information(
+                self, "Police introuvable",
+                f"La police « {info['family']} {info['style']} » n'apparaît pas encore parmi les polices "
+                "installées.\n\nVérifiez que vous avez installé le bon style (gras, italique…) : le nom exact "
+                f"attendu est « {info['names'].get(6) or info['pdf_name']} ».")
 
     def _font_resource_name(self, buffer):
         """Nom de ressource stable pour une police donnée (évite les doublons)."""
