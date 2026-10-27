@@ -53,6 +53,22 @@ d'autres PC, les antivirus bloquaient les DLL compressées et l'application ne d
 (« No module named 'PySide6.QtCore' »).
 
 L'icône `PDF Toolkit 2.ico` est générée par `python make_icon.py` (à relancer seulement si son dessin change).
+Le nom et la version de l'exécutable (Propriétés → Détails) sont lus dans `main.py` (`APP_NAME`, `APP_VERSION`).
+
+### Installateur
+
+L'installateur (Inno Setup 6) installe la version « en dossier » de l'application, qui n'extrait rien au
+lancement : c'est la version recommandée, la moins souvent bloquée par les antivirus.
+
+```
+$env:CONSTRUCTION = "dossier"
+python -m PyInstaller --clean --noconfirm "PDF Toolkit 2.spec"
+ISCC "installer\PDF Toolkit 2.iss"
+```
+
+Le résultat est `dist\PDF-Toolkit-2-Installation-1.0.exe` : installation sans droits d'administrateur,
+raccourcis dans le menu Démarrer (et sur le Bureau au choix), option « Ouvrir avec » pour les fichiers PDF (sans
+changer le lecteur par défaut), désinstallation par Paramètres → Applications.
 
 Les exécutables publiés sont construits par GitHub Actions (`.github/workflows/build.yml`) à partir du code de ce
 dépôt, avec les versions de `requirements-build.txt` : il suffit de pousser une étiquette `v1.1`, `v1.2`… pour
@@ -80,6 +96,7 @@ specifically requested by the user or the person installing or operating it.)*
 | `main.py` | l'application |
 | `make_icon.py` | génère l'icône de l'exécutable |
 | `PDF Toolkit 2.spec` | recette de construction de l'exécutable (PyInstaller) |
+| `installer/PDF Toolkit 2.iss` | script de l'installateur (Inno Setup) |
 | `requirements-build.txt` | versions des outils de construction |
 | `.github/workflows/build.yml` | construction, signature et publication automatiques |
 | `PDF Toolkit 2.ico` | icône |

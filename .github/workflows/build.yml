@@ -37,18 +37,26 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-build.txt
 
-      - name: Construire l'exécutable
+      - name: Construire l'exécutable portable
         run: |
           python -m PyInstaller --clean --noconfirm "PDF Toolkit 2.spec"
           New-Item -ItemType Directory -Force livraison | Out-Null
           Copy-Item "dist\PDF Toolkit 2.exe" "livraison\$env:EXE"
 
-      - name: Mettre de côté l'exécutable (non signé)
+      - name: Construire l'installateur (Inno Setup)
+        run: |
+          choco install innosetup --no-progress -y
+          $env:CONSTRUCTION = "dossier"
+          python -m PyInstaller --clean --noconfirm "PDF Toolkit 2.spec"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q "installer\PDF Toolkit 2.iss"
+          Copy-Item "dist\PDF-Toolkit-2-Installation-*.exe" livraison
+
+      - name: Mettre de côté les exécutables (non signés)
         id: non-signe
         uses: actions/upload-artifact@v4
         with:
           name: non-signe
-          path: livraison/${{ env.EXE }}
+          path: livraison/*.exe
 
       - name: Signer avec SignPath
         if: env.SIGNPATH_API_TOKEN != ''
@@ -67,6 +75,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $fichier = if (Test-Path "signe\$env:EXE") { "signe\$env:EXE" } else { "livraison\$env:EXE" }
-          gh release create "$env:GITHUB_REF_NAME" "$fichier#PDF Toolkit 2.exe (Windows)" `
+          $dossier = if (Test-Path "signe\$env:EXE") { "signe" } else { "livraison" }
+          $installateur = (Get-ChildItem "$dossier\PDF-Toolkit-2-Installation-*.exe").FullName
+          gh release create "$env:GITHUB_REF_NAME" `
+            "$installateur#Installateur PDF Toolkit 2 (Windows, recommandé)" `
+            "$dossier\$env:EXE#PDF Toolkit 2.exe (portable, sans installation)" `
             --title "PDF Toolkit 2 — $($env:GITHUB_REF_NAME.TrimStart('v'))" --generate-notes

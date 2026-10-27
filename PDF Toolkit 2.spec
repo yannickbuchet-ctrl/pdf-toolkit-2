@@ -37,6 +37,38 @@ EXCLUDED_FILES = [
 ]
 
 
+# Informations de version de l'exécutable (Propriétés → Détails) : nom, version, éditeur, copyright.
+# Un exécutable qui en est dépourvu est plus souvent signalé par les antivirus. Nom et version sont lus dans
+# le programme (APP_NAME, APP_VERSION) : il n'y a qu'un endroit à mettre à jour.
+import os
+import re
+
+with open("main.py", encoding="utf-8") as source:
+    CONSTANTS = dict(re.findall(r'^(APP_\w+) = "([^"]*)"', source.read(), re.M))
+NAME, VERSION = CONSTANTS["APP_NAME"], CONSTANTS["APP_VERSION"]
+NUMBERS = tuple((list(map(int, re.findall(r"\d+", VERSION))) + [0, 0, 0, 0])[:4])
+VERSION_FILE = os.path.join("build", "version_info.txt")
+os.makedirs("build", exist_ok=True)
+with open(VERSION_FILE, "w", encoding="utf-8") as fichier:
+    fichier.write(f"""VSVersionInfo(
+  ffi=FixedFileInfo(filevers={NUMBERS}, prodvers={NUMBERS}, mask=0x3f, flags=0x0, OS=0x40004,
+                    fileType=0x1, subtype=0x0, date=(0, 0)),
+  kids=[
+    StringFileInfo([StringTable('040C04B0', [
+      StringStruct('CompanyName', 'Yannick Buchet'),
+      StringStruct('FileDescription', '{NAME} — éditeur de PDF'),
+      StringStruct('FileVersion', '{VERSION}'),
+      StringStruct('InternalName', '{NAME}'),
+      StringStruct('LegalCopyright', '© 2026 Yannick Buchet — licence GNU AGPL v3'),
+      StringStruct('OriginalFilename', '{NAME}.exe'),
+      StringStruct('ProductName', '{NAME}'),
+      StringStruct('ProductVersion', '{VERSION}')])]),
+    VarFileInfo([VarStruct('Translation', [0x040C, 1200])])
+  ]
+)
+""")
+
+
 def keep(entry):
     name = entry[0].lower().replace("/", "\\")
     return not any(pattern in name for pattern in EXCLUDED_FILES)
@@ -53,16 +85,15 @@ a.datas = [d for d in a.datas if keep(d)]
 
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
-    name="PDF Toolkit 2",
-    debug=False,
-    strip=False,
-    upx=False,
-    console=False,
-    icon="PDF Toolkit 2.ico",  # produite par : python make_icon.py
-)
+OPTIONS = dict(name="PDF Toolkit 2", debug=False, strip=False, upx=False, console=False,
+               icon="PDF Toolkit 2.ico",  # produite par : python make_icon.py
+               version=VERSION_FILE)
+
+if os.environ.get("CONSTRUCTION") == "dossier":
+    # Version en dossier, pour l'installateur (installer\PDF Toolkit 2.iss) : dist\PDF Toolkit 2\.
+    # Rien n'est extrait au lancement, ce qui évite aussi les alertes des antivirus.
+    exe = EXE(pyz, a.scripts, [], exclude_binaries=True, **OPTIONS)
+    coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="PDF Toolkit 2")
+else:
+    # Un seul fichier, portable : dist\PDF Toolkit 2.exe.
+    exe = EXE(pyz, a.scripts, a.binaries, a.datas, [], **OPTIONS)
