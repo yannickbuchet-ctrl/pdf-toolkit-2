@@ -23,7 +23,8 @@ remplir les formulaires, signer, protéger par mot de passe et compresser vos do
   souris ; le fond blanc d'une signature scannée devient transparent.
 - **Mots de passe** : ouverture des PDF protégés, protection par mot de passe (chiffrement AES 256 bits).
 - **Compression à l'enregistrement** : sans perte, ou forte (images réduites) pour l'envoi par e-mail.
-- **Annuler et rétablir** chaque opération, zoom, aller à une page (Ctrl+G).
+- **Annuler et rétablir** chaque opération, zoom (Ctrl + molette, autour du point sous la souris), aller à une
+  page (Ctrl+G).
 
 ![Écran d'accueil de PDF Toolkit 2](captures/accueil.png)
 

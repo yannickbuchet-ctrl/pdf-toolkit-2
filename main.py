@@ -7,7 +7,7 @@ import struct
 import sys
 
 import pymupdf
-from PySide6.QtCore import QByteArray, QMimeData, QPoint, QRectF, QSize, Qt, QTimer, QUrl, QUrlQuery, Signal
+from PySide6.QtCore import QByteArray, QEvent, QMimeData, QPoint, QRectF, QSize, Qt, QTimer, QUrl, QUrlQuery, Signal
 from PySide6.QtGui import (
     QAction, QColor, QDesktopServices, QDrag, QFont, QFontDatabase, QIcon, QImage, QKeySequence, QLinearGradient,
     QPageLayout, QPainter, QPainterPath, QPen, QPixmap, QTransform,
@@ -2098,6 +2098,15 @@ class PdfEditor(QMainWindow):
         self.scroll.setObjectName("viewer")
         self.scroll.setWidgetResizable(True)
         self.scroll.setWidget(self.container)
+        # Ctrl + molette : zoom autour du point sous la souris. Les crans rapprochés sont cumulés et appliqués
+        # d'un coup (chaque zoom redessine toutes les pages).
+        self.scroll.viewport().installEventFilter(self)
+        self.wheel_zoom = 1.0
+        self.wheel_anchor = None
+        self.wheel_timer = QTimer(self)
+        self.wheel_timer.setSingleShot(True)
+        self.wheel_timer.setInterval(80)
+        self.wheel_timer.timeout.connect(self._apply_wheel_zoom)
 
         # Accueil tant qu'aucun document n'est ouvert, puis affichage des pages.
         self.welcome = WelcomeWidget(self.open_dialog, self.merge_dialog)
@@ -2317,7 +2326,7 @@ class PdfEditor(QMainWindow):
         self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         toolbar.addWidget(self.zoom_label)
         self.zoom_in_action.setIconText("Zoom +")
-        self.zoom_in_action.setToolTip("Zoom avant (Ctrl++)")
+        self.zoom_in_action.setToolTip("Zoom avant (Ctrl++ ou Ctrl + molette)")
         toolbar.addAction(self.zoom_in_action)
         self._update_zoom_label()
 
@@ -2373,13 +2382,56 @@ class PdfEditor(QMainWindow):
             self.saved_id = self.state_id
         self._update_title()
 
-    def _zoom(self, factor):
+    def _zoom(self, factor, anchor=None):
+        """Change le zoom ; anchor (point de la zone de lecture, Ctrl + molette) : le point du document qui s'y
+        trouve y reste après le zoom."""
         if self.doc is None:
             return
+        old = self.zoom
         self.zoom = max(0.25, min(6.0, self.zoom * factor))
+        if self.zoom == old:
+            return
+        target = None
+        if anchor is not None:  # page sous la souris, et position relative dans cette page
+            point = QPoint(self.scroll.horizontalScrollBar().value() + anchor.x(),
+                           self.scroll.verticalScrollBar().value() + anchor.y())
+            for i, widget in enumerate(self.pages):
+                geometry = widget.geometry()
+                if point.y() <= geometry.bottom() + self.layout.spacing() or i == len(self.pages) - 1:
+                    target = (i, (point.x() - geometry.x()) / max(1, geometry.width()),
+                              (point.y() - geometry.y()) / max(1, geometry.height()))
+                    break
         for i in range(len(self.pages)):
             self.render_page(i)
         self._update_zoom_label()
+        if target is not None:
+            self._scroll_to_anchor(target, anchor)
+
+    def _scroll_to_anchor(self, target, anchor):
+        index, fx, fy = target
+        # Mise en page immédiate à la nouvelle taille (sinon elle n'a lieu qu'au prochain passage de la boucle
+        # d'événements, et le défilement resterait limité à l'ancienne longueur).
+        self.layout.activate()
+        self.container.resize(self.container.sizeHint().expandedTo(self.scroll.viewport().size()))
+        self.layout.activate()
+        geometry = self.pages[index].geometry()
+        self.scroll.horizontalScrollBar().setValue(round(geometry.x() + fx * geometry.width() - anchor.x()))
+        self.scroll.verticalScrollBar().setValue(round(geometry.y() + fy * geometry.height() - anchor.y()))
+
+    def eventFilter(self, watched, event):
+        if (watched is self.scroll.viewport() and event.type() == QEvent.Type.Wheel
+                and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            steps = event.angleDelta().y() / 120  # un cran = 120 ; un pavé tactile envoie des fractions
+            if steps and self.doc is not None:
+                self.wheel_zoom *= 1.15 ** steps
+                self.wheel_anchor = event.position().toPoint()
+                self.wheel_timer.start()
+            return True  # Ctrl + molette ne fait jamais défiler
+        return super().eventFilter(watched, event)
+
+    def _apply_wheel_zoom(self):
+        factor, self.wheel_zoom = self.wheel_zoom, 1.0
+        self._zoom(factor, self.wheel_anchor)
 
     # --- Affichage -------------------------------------------------------
 
