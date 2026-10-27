@@ -189,7 +189,8 @@ APP_ICON_SIZES = (16, 24, 32, 48, 64, 128, 256)
 
 
 def draw_app_icon(size):
-    """Icône du logiciel : page PDF au coin replié et crayon, sur fond dégradé (couleurs de l'accueil).
+    """Icône du logiciel : page PDF au coin replié, étiquette « PDF » et crayon, sans fond (posée sur le Bureau
+    comme un document). Un contour gris et une ombre légère la gardent lisible sur un fond clair.
 
     Dessinée sur une grille de 256 × 256 puis mise à l'échelle : nette à toutes les tailles.
     """
@@ -199,48 +200,47 @@ def draw_app_icon(size):
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
     p.scale(size / 256, size / 256)
-    p.setPen(Qt.PenStyle.NoPen)
 
-    gradient = QLinearGradient(0, 0, 256, 256)
-    gradient.setColorAt(0, QColor(ACCENT))
-    gradient.setColorAt(1, QColor("#7c3aed"))
-    p.setBrush(gradient)
-    p.drawRoundedRect(QRectF(8, 8, 240, 240), 52, 52)
-
-    # Page blanche au coin replié, avec quelques lignes de texte.
+    # Page blanche au coin replié : ombre douce, puis page bordée de gris.
     page = QPainterPath()
-    page.moveTo(64, 36)
-    page.lineTo(158, 36)
-    page.lineTo(196, 74)
-    page.lineTo(196, 220)
-    page.lineTo(64, 220)
+    page.moveTo(50, 14)
+    page.lineTo(164, 14)
+    page.lineTo(210, 60)
+    page.lineTo(210, 238)
+    page.lineTo(50, 238)
     page.closeSubpath()
+    p.setPen(Qt.PenStyle.NoPen)
+    for offset, alpha in ((7, 18), (4, 28)):
+        p.setBrush(QColor(15, 23, 42, alpha))
+        p.drawPath(page.translated(offset * 0.6, offset))
     p.setBrush(QColor("#ffffff"))
+    p.setPen(QPen(QColor("#94a3b8"), 5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
     p.drawPath(page)
     fold = QPainterPath()
-    fold.moveTo(158, 36)
-    fold.lineTo(158, 74)
-    fold.lineTo(196, 74)
+    fold.moveTo(164, 14)
+    fold.lineTo(164, 60)
+    fold.lineTo(210, 60)
     fold.closeSubpath()
-    p.setBrush(QColor("#c7d2fe"))
+    p.setBrush(QColor("#e2e8f0"))
     p.drawPath(fold)
+    p.setPen(Qt.PenStyle.NoPen)
     p.setBrush(QColor("#cbd5e1"))
-    for y, width in ((74, 64), (98, 100), (122, 84)):
-        p.drawRoundedRect(QRectF(84, y, width, 12), 6, 6)
+    for y, width in ((56, 70), (80, 110), (104, 92)):
+        p.drawRoundedRect(QRectF(72, y, width, 12), 6, 6)
 
-    # Étiquette « PDF ».
-    label = QRectF(40, 150, 122, 52)
+    # Étiquette « PDF », qui déborde à gauche de la page.
+    label = QRectF(26, 150, 140, 60)
     p.setBrush(QColor(RED))
     p.drawRoundedRect(label, 12, 12)
     font = QFont("Segoe UI")
-    font.setPixelSize(38)
+    font.setPixelSize(44)
     font.setBold(True)
     p.setFont(font)
     p.setPen(QColor("#ffffff"))
     p.drawText(label, Qt.AlignmentFlag.AlignCenter, "PDF")
 
     # Crayon (édition), pointe vers le bas à gauche, détouré de blanc.
-    p.translate(204, 146)
+    p.translate(214, 150)
     p.rotate(135)
     outline = QPainterPath()
     outline.moveTo(-54, -14)
