@@ -665,7 +665,23 @@ class InlineEditor(QLineEdit):
 
     def focusOutEvent(self, event):
         super().focusOutEvent(event)
-        self.cancelled.emit()
+        # Une autre fenêtre (« Police d'origine », autre application) n'annule pas la saisie : on la
+        # retrouve en revenant. Seul un clic ailleurs dans la fenêtre l'annule.
+        if event.reason() not in (Qt.FocusReason.ActiveWindowFocusReason, Qt.FocusReason.PopupFocusReason):
+            self.cancelled.emit()
+
+
+class FontWarning(QLabel):
+    """Bandeau « police non installée » : garde pour lui les clics, qui sinon passeraient à la page ; la page
+    prendrait le focus et la zone de saisie se fermerait (en supprimant le bandeau avant la fin du clic)."""
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        event.accept()
 
 
 class PageWidget(QWidget):
@@ -1027,11 +1043,17 @@ class PageWidget(QWidget):
         """
         family, style = readable_font_name(span["font"])
         name = html.escape(f"{family} {style}".strip())
-        warning = QLabel(f"⚠ Police « <b>{name}</b> » non installée sur ce PC : la saisie s'affiche dans une autre "
+        warning = FontWarning(f"⚠ Police « <b>{name}</b> » non installée sur ce PC : la saisie s'affiche dans une autre "
                          "police, et le texte sera écrit avec la police intégrée au PDF si elle contient vos "
                          "lettres, sinon avec une police proche. <a href='infos'>Infos sur la police…</a> "
                          "pour la retrouver et l'installer.", self)
         warning.setTextFormat(Qt.TextFormat.RichText)
+        # Un clic sur le bandeau ne doit pas retirer le focus à la zone de saisie : elle se fermerait et
+        # supprimerait le bandeau avant la fin du clic sur le lien. Le focus du bandeau est donc confié à la zone
+        # de saisie (sinon Qt le donnerait à la page, premier parent qui l'accepte).
+        warning.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        warning.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        warning.setFocusProxy(self.editor)
         warning.linkActivated.connect(lambda _link: self.font_info_requested.emit(self.index, span))
         warning.setWordWrap(True)
         warning.setStyleSheet("background: #fef3c7; color: #92400e; border: 1px solid #f59e0b; "
