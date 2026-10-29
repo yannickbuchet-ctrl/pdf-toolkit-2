@@ -71,7 +71,7 @@ python -m PyInstaller --clean --noconfirm "PDF Toolkit 2.spec"
 ISCC "installer\PDF Toolkit 2.iss"
 ```
 
-Le résultat est `dist\PDF-Toolkit-2-Installation-1.0.exe` : installation sans droits d'administrateur,
+Le résultat est `dist\PDF-Toolkit-2-Installation-<version>.exe` : installation sans droits d'administrateur,
 raccourcis dans le menu Démarrer (et sur le Bureau au choix), option « Ouvrir avec » pour les fichiers PDF (sans
 changer le lecteur par défaut), désinstallation par Paramètres → Applications.
 
