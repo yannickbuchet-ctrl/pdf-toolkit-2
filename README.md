@@ -1,53 +1,132 @@
 # PDF Toolkit 2
 
 Un éditeur de PDF simple et en français pour Windows : modifier le texte, assembler et organiser les pages,
-remplir les formulaires, signer, protéger par mot de passe et compresser vos documents.
+remplir les formulaires, signer, comparer deux versions d'un document ou d'un plan, créer des planches de photos
+d'identité, protéger par mot de passe et compresser vos documents. Tout se passe sur votre ordinateur : aucun
+document n'est envoyé sur Internet.
 
 ![PDF Toolkit 2 : recherche et remplacement dans un document](captures/fenetre.png)
 
 ## Fonctionnalités
 
-- **Ouvrir, enregistrer, imprimer** : ouverture par le menu ou par glisser-déposer d'un PDF dans la fenêtre.
-- **Modifier le texte** : cliquez sur un texte pour le réécrire ; la police d'origine est conservée quand c'est
-  possible (police intégrée au PDF ou installée sur l'ordinateur).
+### Lire et naviguer
+
+- **Ouvrir** un PDF par le menu (Ctrl+O), par glisser-déposer dans la fenêtre, ou avec « Ouvrir avec » si
+  l'application est installée. Les PDF protégés par mot de passe s'ouvrent après saisie du mot de passe.
+- **Zoom** avec Ctrl + molette, autour du point sous la souris, ou Ctrl++ et Ctrl+-. **Aller à une page** : Ctrl+G.
+- **Rechercher** (Ctrl+F) : toutes les occurrences sont surlignées ; F3 et Maj+F3 passent à la suivante ou à la
+  précédente.
+- **Imprimer** (Ctrl+P) : les pages sont ajustées à la feuille, sauf les planches de photos d'identité, imprimées à
+  100 % pour garder la taille exacte des photos.
+
+### Modifier le texte
+
+- Passez en **mode édition du texte** (Ctrl+E), puis cliquez sur un texte pour le réécrire sur place. L'ancien texte
+  est vraiment retiré du fichier, pas seulement caché.
+- La **police d'origine** est gardée quand c'est possible : police intégrée au PDF, ou la même police installée sur
+  l'ordinateur. Sinon, une police proche et de mêmes dimensions la remplace.
 - **Police d'origine non installée** : un avertissement s'affiche sous le texte en cours d'édition. La fenêtre
   « Infos sur la police » donne tout ce que le PDF en dit (nom exact, style, version, éditeur, créateur, sites,
   licence, lettres disponibles dans le PDF) et des boutons pour la rechercher sur Internet ou sur Google Fonts ;
   une fois installée, elle est prise en compte sans redémarrer.
-- **Rechercher et remplacer** : toutes les occurrences sont surlignées, remplacement une par une ou en une fois.
-- **Concaténer des PDF** : assemblez plusieurs fichiers dans l'ordre de votre choix ; un PDF glissé sur le document
-  ouvert est ajouté à la fin.
-- **Organiser les pages** : sélection au clic gauche, déplacement par glisser au clic droit, rotation et suppression.
-- **Remplir les formulaires** : champs texte, cases à cocher et listes de choix.
-- **Images et signatures** : insérez une image ou une signature (PNG, JPG), placez-la et redimensionnez-la à la
-  souris ; le fond blanc d'une signature scannée devient transparent.
-- **Photos d'identité** : à partir d'une photo, sélectionnez la zone (cadre aux bonnes proportions, ovale du visage),
-  zoomez, tronquez, pivotez, redressez, réglez la luminosité et le contraste. Choisissez le format (France et Union
-  européenne, Royaume-Uni, États-Unis, Canada, Chine, Japon, Australie ou sur mesure) et le papier (10 × 15 cm,
-  13 × 18 cm, A6, A5, A4, Lettre ou sur mesure) : le PDF porte autant de photos que la feuille peut en contenir, ou le
-  nombre demandé, et s'imprime à leur taille exacte, sans mise à l'échelle. La marge et l'espacement ne changent que le
-  nombre de photos, jamais leur taille. Une planche enregistrée se modifie ensuite (« Modifier la planche », Ctrl+Maj+M) :
-  la photo entière et les réglages sont joints au PDF, sauf si vous décochez cette option avant de transmettre le fichier.
-- **Comparer deux PDF** (Fichier → Comparer deux PDF, Ctrl+Maj+C) : les deux versions d'un document s'affichent côte
-  à côte, avec les différences surlignées : mots ajoutés en vert, supprimés en rouge, modifiés en orange, et images,
-  dessins, couleurs, surlignages ou mise en page changés encadrés en violet. Les pages ajoutées ou supprimées sont repérées sans décaler la
-  suite, et un paragraphe qui passe à la page suivante n'est pas compté comme une différence. La liste des
-  différences, regroupées par page avec leur nombre par type, mène directement à chacune (F3 et Maj+F3 pour passer à
-  la suivante ou à la précédente) ; le défilement et le zoom des deux versions restent synchronisés. Options : ignorer
-  les majuscules, la ponctuation, comparer le texte seul ou l'aspect seul, tolérance de la comparaison visuelle. Les
-  PDF scannés, sans texte, sont comparés par leur aspect. L'affichage « Superposées » montre les deux versions en une
-  seule page : ce qui n'est que dans l'ancienne en rouge, ce qui n'est que dans la nouvelle en vert. Le réglage « Plan
-  technique » compare deux fois plus finement, pour les plans et les circuits imprimés (couches Gerber imprimées en
-  PDF) : une piste décalée de quelques centièmes de millimètre ou un via agrandi sont trouvés, et chaque changement est
-  situé en millimètres. Les couches (F.Cu, B.Cu, Top Layer…) sont reconnues et nommées. Un rapport PDF des différences
-  (synthèse, liste numérotée, pages annotées et gros plans de chaque différence avec la superposition) peut être
-  enregistré. Le document ouvert, avec ses modifications, est proposé comme première version.
-- **Mots de passe** : ouverture des PDF protégés, protection par mot de passe (chiffrement AES 256 bits).
-- **Compression à l'enregistrement** : sans perte, ou forte (images réduites) pour l'envoi par e-mail.
-- **Annuler et rétablir** chaque opération, zoom (Ctrl + molette, autour du point sous la souris), aller à une
-  page (Ctrl+G).
+- **Rechercher et remplacer** (Ctrl+H) : remplacement une par une ou de toutes les occurrences en une fois.
 
-![Écran d'accueil de PDF Toolkit 2](captures/accueil.png)
+### Remplir, signer, insérer
+
+- **Formulaires** : zones de texte, cases à cocher, cases rondes à choix unique (« ○ Oui ● Non ») et listes de choix
+  se remplissent directement sur la page.
+- **Images et signatures** (Ctrl+I, Ctrl+Maj+I) : insérez une image PNG ou JPG, placez-la et redimensionnez-la à la
+  souris. Le fond blanc d'une signature scannée devient transparent.
+
+### Organiser et assembler
+
+- **Organiser les pages** (Ctrl+R) : sélectionnez des pages au clic gauche, déplacez-les en les faisant glisser avec
+  le clic droit, faites-les pivoter ou supprimez-les. Un clic droit sur une page du document propose aussi la rotation
+  et la suppression.
+- **Concaténer des PDF** (Ctrl+M) : assemblez plusieurs fichiers dans l'ordre de votre choix. Un PDF glissé sur le
+  document ouvert est ajouté à la fin.
+- **Annuler et rétablir** (Ctrl+Z, Ctrl+Y) chaque opération, jusqu'à 50 étapes en arrière.
+
+### Comparer deux PDF
+
+Fichier → **Comparer deux PDF** (Ctrl+Maj+C). Le document ouvert, avec ses modifications, est proposé comme version A
+(l'ancienne) ; choisissez la version B (la nouvelle), puis cliquez sur **Comparer**. **Inverser** échange les deux.
+
+- **Ce qui est comparé** : le texte mot à mot (mots ajoutés en vert, supprimés en rouge, modifiés en orange) et
+  l'aspect des pages, pixel par pixel et en couleurs (images, dessins, surlignages, couleur du texte : encadrés en
+  violet). Les pages ajoutées ou supprimées sont repérées sans décaler la suite, et un paragraphe qui passe simplement
+  à la page suivante n'est pas compté comme une différence.
+- **Deux affichages** : **côte à côte**, avec défilement et zoom synchronisés, ou **superposées** : les deux versions
+  en une seule page, ce qui n'est que dans l'ancienne en rouge, ce qui n'est que dans la nouvelle en vert, ce qui
+  est commun en noir. Passer de l'un à l'autre garde l'endroit regardé.
+- **La liste des différences**, regroupées par page avec leur nombre par type, mène directement à chacune ; F3 et
+  Maj+F3 passent à la suivante ou à la précédente.
+- **Réglages** :
+  - **Document** (par défaut) : pour les textes, contrats, devis… avec une tolérance visuelle de 10 %, qui ignore le
+    bruit d'une image recompressée.
+  - **Plan technique (circuit, dessin)** : pour les plans et les circuits imprimés, par exemple des couches Gerber
+    imprimées en PDF. La comparaison est deux fois plus fine et la tolérance de 5 % : une piste décalée de quelques
+    centièmes de millimètre ou un via agrandi sont trouvés, et deux changements voisins restent séparés. Chaque
+    changement est situé en millimètres depuis le coin de la page, et les couches (F.Cu, B.Cu, In1.Cu, Top Layer,
+    Edge.Cuts…) sont reconnues et nommées.
+  - Options : ignorer les majuscules, ignorer la ponctuation, comparer le texte seul ou l'aspect seul, tolérance
+    visuelle réglable.
+- **Rapport PDF** : synthèse, liste numérotée des différences, pages des deux versions annotées, puis un **gros plan**
+  de chaque différence (ancienne version, nouvelle version et superposition).
+- **PDF scannés** (sans texte) : ils sont comparés par leur aspect seulement.
+
+### Photos d'identité
+
+Fichier → **Photos d'identité** (Ctrl+Maj+P), à partir d'une photo (JPG, PNG, BMP, GIF ou TIFF) :
+
+- sélectionnez la zone (cadre aux bonnes proportions, ovale du visage), zoomez, tronquez, pivotez, redressez, réglez
+  la luminosité et le contraste ;
+- choisissez le format (France et Union européenne, Royaume-Uni, États-Unis, Canada, Chine, Japon, Australie ou sur
+  mesure) et le papier (10 × 15 cm, 13 × 18 cm, A6, A5, A4, Lettre ou sur mesure) ;
+- le PDF porte autant de photos que la feuille peut en contenir, ou le nombre demandé, et s'imprime à leur **taille
+  exacte**, sans mise à l'échelle. La marge et l'espacement ne changent que le nombre de photos, jamais leur taille.
+
+Une planche enregistrée se modifie ensuite (« Modifier la planche de photos », Ctrl+Maj+M) : la photo entière et les
+réglages sont joints au PDF, sauf si vous décochez cette option avant de transmettre le fichier.
+
+### Protéger et alléger
+
+- **Mot de passe** (Fichier → Protéger par mot de passe) : protection par chiffrement AES 256 bits, ou retrait de la
+  protection d'un PDF ouvert avec son mot de passe.
+- **Compression à l'enregistrement** : sans perte, ou forte pour l'envoi par e-mail (images recompressées en JPEG et
+  ramenées à environ 150 ppp si elles sont très détaillées).
+
+### Raccourcis clavier
+
+| Action | Raccourci |
+|---|---|
+| Ouvrir, enregistrer, enregistrer sous | Ctrl+O, Ctrl+S, Ctrl+Maj+S |
+| Fermer le document, quitter | Ctrl+W, Alt+F4 |
+| Imprimer | Ctrl+P |
+| Annuler, rétablir | Ctrl+Z, Ctrl+Y |
+| Mode édition du texte | Ctrl+E |
+| Rechercher, rechercher et remplacer | Ctrl+F, Ctrl+H |
+| Occurrence ou différence suivante, précédente | F3, Maj+F3 |
+| Zoom avant, arrière | Ctrl++, Ctrl+- (ou Ctrl + molette) |
+| Aller à la page | Ctrl+G |
+| Organiser les pages | Ctrl+R |
+| Concaténer des PDF | Ctrl+M |
+| Insérer une image, une signature | Ctrl+I, Ctrl+Maj+I |
+| Comparer deux PDF | Ctrl+Maj+C |
+| Photos d'identité, modifier une planche | Ctrl+Maj+P, Ctrl+Maj+M |
+
+### Limites connues
+
+- **Modification du texte** : le nouveau texte reste sur la ligne d'origine, sans retour à la ligne automatique. Une
+  police absente du PDF et de l'ordinateur est remplacée par une police proche.
+- **Comparaison** :
+  - un texte déplacé loin de sa place apparaît comme une suppression et un ajout ;
+  - des pages simplement interverties sont signalées comme ajoutées, supprimées ou décalées, pas comme « déplacées » ;
+  - le texte des PDF scannés n'est pas lu (pas de reconnaissance de caractères) ;
+  - en réglage Document, un changement de moins d'un dixième de millimètre peut passer inaperçu : utilisez le réglage
+    Plan technique pour les dessins fins ;
+  - la superposition compare les pages en niveaux de gris : un simple changement de couleur s'y voit mal, mais il est
+    signalé dans la liste.
 
 ## Utiliser l'application
 
