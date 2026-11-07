@@ -430,6 +430,27 @@ def essai_interface(chemin):
              "Ctrl+Z n'a pas tout annulé")
     editeur.redo()
     verifier("séance" in editeur.doc[0].get_text() and editeur.doc[3].rotation == 180, "Ctrl+Y n'a pas tout rétabli")
+
+    # Annuler pendant la lecture : les pages lues gardent leur texte, les autres restent intactes ; relancer reprend.
+    editeur.undo()
+    editeur.undo_stack.clear()
+    fenetre = main.OcrDialog(editeur)
+    fenetre.start()
+    while fenetre.job is not None and "Page 2" not in fenetre.status.text():
+        app.processEvents()
+    app.processEvents()  # la page 2 est lue au passage suivant
+    fenetre.reject()  # bouton « Annuler » pendant la lecture
+    verifier(fenetre.job is None and "interrompue" in fenetre.status.text(), f"annulation : {fenetre.status.text()}")
+    lues = [i for i in range(5) if main.ocr_layers(editeur.doc, editeur.doc[i])]
+    verifier(lues and lues == list(range(len(lues))) and len(lues) < 4, f"annulation : pages lues {lues}")
+    verifier(len(editeur.undo_stack) == 1, "annulation : une seule étape d'annulation attendue")
+    fenetre.start()  # « Relancer » : seules les pages restantes sont lues
+    while fenetre.job is not None:
+        app.processEvents()
+    verifier(sorted(fenetre.result["skipped"]) == [*lues, 4] and len(fenetre.result["done"]) == 4 - len(lues),
+             f"reprise : {fenetre.result['done']} lues, {fenetre.result['skipped']} ignorées")
+    bilan.append(f"interface — annulation après {len(lues)} page(s) lue(s), puis reprise des {4 - len(lues)} autres")
+    fenetre.close()
     editeur._set_modified(False)
     editeur.close()
 
