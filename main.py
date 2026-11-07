@@ -5359,7 +5359,7 @@ OCR_ORIENTATION_DPI = 150  # rendu réduit, pour essayer vite les quatre sens d'
 OCR_MAX_PIXELS = 36_000_000  # au-delà (affiche, plan A1…), la résolution baisse pour ménager la mémoire
 OCR_MIN_DPI = 100
 OCR_LANGUAGES = (("fra", "Français"), ("eng", "Anglais"), ("fra+eng", "Français et anglais"))
-OCR_LANGUAGE_NAMES = {"fra": "français", "eng": "anglais"}
+OCR_LANGUAGE_NAMES = {"fra": "du français", "eng": "de l'anglais"}  # « les données du français »
 # Mise en page automatique (3) : sans elle, Tesseract lit la page comme un seul bloc de texte et saute les tableaux.
 OCR_TESSERACT_OPTIONS = "tessedit_pageseg_mode=3"
 OCR_FONT = "GlyphLessFont"  # nom usuel de la police des calques OCR (Tesseract, MuPDF, OCRmyPDF…)
@@ -5438,9 +5438,9 @@ def missing_ocr_languages(language):
 
 
 def missing_language_message(codes):
-    names = " et ".join(OCR_LANGUAGE_NAMES.get(code, code) for code in codes)
+    names = " et ".join(OCR_LANGUAGE_NAMES.get(code, f"de la langue « {code} »") for code in codes)
     base, folder = tessdata_location()
-    return (f"Les données de reconnaissance du {names} sont introuvables (fichier "
+    return (f"Les données de reconnaissance {names} sont introuvables (fichier "
             f"{', '.join(code + '.traineddata' for code in codes)} absent de {os.path.join(base, folder)}). "
             "Réinstallez l'application, ou choisissez une autre langue.")
 

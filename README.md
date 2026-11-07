@@ -1,9 +1,9 @@
 # PDF Toolkit 2
 
 Un éditeur de PDF simple et en français pour Windows : modifier le texte, assembler et organiser les pages,
-remplir les formulaires, signer, comparer deux versions d'un document ou d'un plan, créer des planches de photos
-d'identité, protéger par mot de passe et compresser vos documents. Tout se passe sur votre ordinateur : aucun
-document n'est envoyé sur Internet.
+remplir les formulaires, signer, comparer deux versions d'un document ou d'un plan, rendre un document scanné
+cherchable (reconnaissance de texte), créer des planches de photos d'identité, protéger par mot de passe et
+compresser vos documents. Tout se passe sur votre ordinateur : aucun document n'est envoyé sur Internet.
 
 ![PDF Toolkit 2 : recherche et remplacement dans un document](captures/fenetre.png)
 
@@ -30,6 +30,28 @@ document n'est envoyé sur Internet.
   licence, lettres disponibles dans le PDF) et des boutons pour la rechercher sur Internet ou sur Google Fonts ;
   une fois installée, elle est prise en compte sans redémarrer.
 - **Rechercher et remplacer** (Ctrl+H) : remplacement une par une ou de toutes les occurrences en une fois.
+
+### Rendre un scan cherchable (OCR)
+
+Édition → **Reconnaissance de texte (OCR)** (Ctrl+Maj+O, bouton « OCR »). Le texte des pages scannées est lu sur
+l'image, puis posé dessus en **calque invisible**, mot par mot, à la place de chaque mot : la page garde son aspect,
+mais son texte se **cherche** (Ctrl+F, accents compris), se **sélectionne** et se **copie** dans n'importe quel
+lecteur de PDF, et le calque est gardé à l'enregistrement. Rien n'est envoyé : la lecture se fait sur l'ordinateur,
+avec le moteur Tesseract intégré à l'application.
+
+- **Pages** : toutes, ou une liste (« 1-3, 7 ») ; **langue** : français (par défaut), anglais, ou les deux.
+- **Ignorer les pages qui contiennent déjà du texte** (coché) : les pages déjà lisibles, ou déjà passées à l'OCR,
+  sont laissées telles quelles. Décochée, une page déjà passée à l'OCR est relue : son ancien texte reconnu est
+  remplacé, jamais ajouté en double.
+- **Redresser les pages scannées à l'envers ou d'un quart de tour** (coché) : une page qui se lit mal est essayée
+  dans les quatre sens, puis pivotée pour s'afficher à l'endroit.
+- La progression s'affiche page par page. **Annuler** arrête la lecture à la fin de la page en cours : les pages
+  déjà lues gardent leur texte, et relancer l'OCR reprend où elle s'était arrêtée. **Ctrl+Z** annule toute
+  l'opération d'un coup.
+- À la fin, **Copier le texte** ou **Enregistrer en .txt** le texte reconnu, page par page.
+- En mode édition, le texte reconnu, encadré en pointillés gris, **ne se modifie pas** : il est invisible, et un texte
+  réécrit s'afficherait par-dessus l'image. « Rechercher et remplacer » le laisse aussi tel quel. Pour le corriger,
+  refaites l'OCR de la page.
 
 ### Remplir, signer, insérer
 
@@ -118,6 +140,7 @@ réglages sont joints au PDF, sauf si vous décochez cette option avant de trans
 | Concaténer des PDF | Ctrl+M |
 | Insérer une image, une signature | Ctrl+I, Ctrl+Maj+I |
 | Comparer deux PDF | Ctrl+Maj+C |
+| Reconnaissance de texte (OCR) | Ctrl+Maj+O |
 | Photos d'identité, modifier une planche | Ctrl+Maj+P, Ctrl+Maj+M |
 
 ### Limites connues
@@ -127,11 +150,21 @@ réglages sont joints au PDF, sauf si vous décochez cette option avant de trans
 - **Comparaison** :
   - un texte déplacé loin de sa place apparaît comme une suppression et un ajout ;
   - des pages simplement interverties sont signalées comme ajoutées, supprimées ou décalées, pas comme « déplacées » ;
-  - le texte des PDF scannés n'est pas lu (pas de reconnaissance de caractères) ;
+  - le texte d'un PDF scanné n'est comparé qu'après sa reconnaissance de texte (OCR) ; sans elle, seul son aspect
+    l'est ;
   - en réglage Document, un changement de moins d'un dixième de millimètre peut passer inaperçu : utilisez le réglage
     Plan technique pour les dessins fins ;
   - la superposition compare les pages en niveaux de gris : un simple changement de couleur s'y voit mal, mais il est
     signalé dans la liste.
+- **Reconnaissance de texte (OCR)** :
+  - texte imprimé seulement, en français ou en anglais : l'écriture manuscrite n'est pas lue, et un scan flou, très
+    incliné ou de basse résolution (moins de 200 ppp) donne plus d'erreurs. Sur des scans d'essai à 300 ppp,
+    bruités et inclinés d'un demi-degré, environ 2 % des caractères sont faux (accents compris) ;
+  - chaque page est lue en une seconde environ, pendant laquelle la fenêtre attend la fin de la page (PyMuPDF garde
+    la main pendant le calcul) ; elle se met à jour entre deux pages ;
+  - le texte vertical (sur une page tournée qu'on choisit de ne pas redresser) n'est pas reconnu ;
+  - le calque d'OCR posé par un autre logiciel est gardé : relire une telle page, case « Ignorer… » décochée, ajoute
+    le texte de PDF Toolkit 2 à côté du sien.
 
 ## Utiliser l'application
 
@@ -161,9 +194,21 @@ pip install pyinstaller
 python -m PyInstaller --clean "PDF Toolkit 2.spec"
 ```
 
-Le résultat est `dist\PDF Toolkit 2.exe`, un seul fichier sans console. Il n'est pas compressé avec UPX : sur
+Le résultat est `dist\PDF Toolkit 2.exe`, un seul fichier sans console, avec les données de langue de l'OCR
+(dossier `tessdata`, dont la recette vérifie l'empreinte SHA-256). Il n'est pas compressé avec UPX : sur
 d'autres PC, les antivirus bloquaient les DLL compressées et l'application ne démarrait pas
 (« No module named 'PySide6.QtCore' »).
+
+Essai de la reconnaissance de texte, sur des scans de synthèse (aucun document personnel) : précision, recherche,
+sélection et copie, enregistrement, OCR refaite sans doublon, pages pivotées ou tournées, interface sans écran.
+
+```
+python tests/essai_ocr.py                                  # depuis le code source
+python tests/essai_ocr.py --exe "dist/PDF Toolkit 2.exe"   # dans l'exécutable construit
+```
+
+L'exécutable accepte aussi `--ocr entrée.pdf sortie.pdf [fra|eng|fra+eng]` : il lit alors le texte de toutes les
+pages sans ouvrir de fenêtre (réglages par défaut), ce qui sert à cet essai et au traitement par lots.
 
 L'icône `PDF Toolkit 2.ico` est générée par `python make_icon.py` (à relancer seulement si son dessin change).
 Le nom et la version de l'exécutable (Propriétés → Détails) sont lus dans `main.py` (`APP_NAME`, `APP_VERSION`).
@@ -211,6 +256,8 @@ specifically requested by the user or the person installing or operating it.)*
 | `PDF Toolkit 2.spec` | recette de construction de l'exécutable (PyInstaller) |
 | `installer/PDF Toolkit 2.iss` | script de l'installateur (Inno Setup) |
 | `requirements-build.txt` | versions des outils de construction |
+| `tessdata/` | données de langue de la reconnaissance de texte (français, anglais) et leur licence |
+| `tests/essai_ocr.py` | essai de la reconnaissance de texte, depuis le code source ou dans l'exécutable |
 | `.github/workflows/build.yml` | construction, signature et publication automatiques |
 | `PDF Toolkit 2.ico` | icône |
 | `captures/` | captures d'écran de ce README |
@@ -220,6 +267,20 @@ specifically requested by the user or the person installing or operating it.)*
 PDF Toolkit 2 est distribué sous la licence **GNU AGPL v3** (voir [LICENSE](LICENSE)).
 Ce choix est imposé par [PyMuPDF](https://pymupdf.readthedocs.io/), qui lit et écrit les PDF et est lui-même
 sous licence AGPL : toute personne qui distribue ce logiciel, modifié ou non, doit aussi en publier le code source.
+
+### Données de la reconnaissance de texte
+
+Le moteur [Tesseract](https://github.com/tesseract-ocr/tesseract) (Apache 2.0) est intégré à PyMuPDF. Ses données
+de langue, dans `tessdata/`, sont les modèles « best_int » : les réseaux de
+[tessdata_best](https://github.com/tesseract-ocr/tessdata_best) (Google, licence Apache 2.0, texte dans
+`tessdata/LICENSE`) convertis en entiers par le projet Tesseract.js (paquets npm `@tesseract.js-data/fra` et
+`@tesseract.js-data/eng` 1.0.0, dossier `4.0.0_best_int`). Sur des scans d'essai, ils font autant d'erreurs que
+tessdata_best (2,2 % des caractères en français, contre 3,1 % pour tessdata_fast), à la vitesse de tessdata_fast.
+
+| Fichier | Taille | SHA-256 |
+|---|---|---|
+| `fra.traineddata` | 1,2 Mo | `bf83833fa957ff0076f6aa93f69e3bdf7b014dea829ea0c0d6be6b48a3ceef6d` |
+| `eng.traineddata` | 5,0 Mo | `5dc5d8d640a212c9d6184921ba103b186f50e0fed9ee716c53e6b312b400d747` |
 
 ## Crédits
 
@@ -231,3 +292,5 @@ sous licence AGPL : toute personne qui distribue ce logiciel, modifié ou non, d
   [libheif](https://github.com/strukturag/libheif) et [libde265](https://github.com/strukturag/libde265)
   (struktur AG, LGPL v3) et l'encodeur [x265](https://www.x265.org/) (GPL v2 ou ultérieure), dont libheif ne peut se
   passer. Toutes ces licences sont compatibles avec l'AGPL v3 de l'application.
+- [Tesseract](https://github.com/tesseract-ocr/tesseract) et ses données de langue (Apache 2.0) pour la
+  reconnaissance de texte.

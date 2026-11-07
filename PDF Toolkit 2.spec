@@ -80,8 +80,23 @@ def keep(entry):
     return not any(pattern in name for pattern in EXCLUDED_FILES)
 
 
+# Données de langue de la reconnaissance de texte (OCR) : modèles « best_int » de Tesseract (Apache 2.0), suivis dans
+# le dépôt et placés dans le dossier tessdata de l'exécutable (sys._MEIPASS), en un seul fichier comme en dossier.
+# Leur empreinte est vérifiée : une construction n'embarque jamais un fichier abîmé ou remplacé.
+import hashlib
+
+TESSDATA_SHA256 = {
+    "fra.traineddata": "bf83833fa957ff0076f6aa93f69e3bdf7b014dea829ea0c0d6be6b48a3ceef6d",
+    "eng.traineddata": "5dc5d8d640a212c9d6184921ba103b186f50e0fed9ee716c53e6b312b400d747",
+}
+for tessdata_name, tessdata_hash in TESSDATA_SHA256.items():
+    with open(os.path.join("tessdata", tessdata_name), "rb") as tessdata_file:
+        if hashlib.sha256(tessdata_file.read()).hexdigest() != tessdata_hash:
+            raise SystemExit(f"tessdata\\{tessdata_name} : empreinte SHA-256 inattendue (fichier abîmé ou remplacé).")
+
 a = Analysis(
     ["main.py"],
+    datas=[(os.path.join("tessdata", name), "tessdata") for name in (*TESSDATA_SHA256, "LICENSE")],
     excludes=EXCLUDED_MODULES,
     noarchive=False,
     optimize=2,

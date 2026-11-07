@@ -43,11 +43,17 @@ jobs:
           New-Item -ItemType Directory -Force livraison | Out-Null
           Copy-Item "dist\PDF Toolkit 2.exe" "livraison\$env:EXE"
 
+      # Les données de langue (tessdata, vérifiées par leur SHA-256 dans la recette) doivent être dans l'exécutable :
+      # l'essai lit des scans de synthèse avec « --ocr » et vérifie le texte obtenu.
+      - name: Essayer la reconnaissance de texte (OCR) dans l'exécutable
+        run: python tests/essai_ocr.py --exe "dist\PDF Toolkit 2.exe"
+
       - name: Construire l'installateur (Inno Setup)
         run: |
           choco install innosetup --no-progress -y
           $env:CONSTRUCTION = "dossier"
           python -m PyInstaller --clean --noconfirm "PDF Toolkit 2.spec"
+          if (-not (Test-Path "dist\PDF Toolkit 2\_internal\tessdata\fra.traineddata")) { throw "tessdata absent de la version en dossier" }
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q "installer\PDF Toolkit 2.iss"
           Copy-Item "dist\PDF-Toolkit-2-Installation-*.exe" livraison
 
