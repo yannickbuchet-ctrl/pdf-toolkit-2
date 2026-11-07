@@ -285,6 +285,8 @@ tessdata_best (2,2 % des caractères en français, contre 3,1 % pour tessdata_fa
 ## Crédits
 
 - Application écrite par **Claude Code** (Claude Opus 5.5) sous la direction de **Yannick Buchet**.
+- Reconnaissance de texte : [Tesseract](https://github.com/tesseract-ocr/tesseract), intégré à PyMuPDF, et ses données
+  de langue (Apache 2.0).
 - [PyMuPDF](https://pymupdf.readthedocs.io/) (AGPL) pour le traitement des PDF,
   [PySide6 / Qt](https://doc.qt.io/qtforpython/) (LGPL) pour l'interface.
 - Photos WebP et HEIC : [Pillow](https://python-pillow.github.io/) (licence MIT-CMU) et
