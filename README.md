@@ -35,8 +35,12 @@ document n'est envoyé sur Internet.
 
 - **Formulaires** : zones de texte, cases à cocher, cases rondes à choix unique (« ○ Oui ● Non ») et listes de choix
   se remplissent directement sur la page.
-- **Images et signatures** (Ctrl+I, Ctrl+Maj+I) : insérez une image PNG ou JPG, placez-la et redimensionnez-la à la
-  souris. Le fond blanc d'une signature scannée devient transparent.
+- **Images et signatures** (Ctrl+I, Ctrl+Maj+I) : insérez une image, placez-la et redimensionnez-la à la souris. Le
+  fond blanc d'une signature scannée devient transparent.
+- **Formats de photo** : JPEG, PNG, **HEIC et HEIF** (photos d'iPhone et de certains Android), WebP, GIF, BMP et TIFF.
+  Une photo prise en hauteur est insérée droite. Un JPEG est inséré tel quel, sans perte. Une photo HEIC ou WebP est
+  mise dans le PDF en JPEG, ou en PNG si elle a des transparences. Le format AVIF n'est pas pris en charge (la
+  version web le lit).
 
 ### Organiser et assembler
 
@@ -77,7 +81,8 @@ Fichier → **Comparer deux PDF** (Ctrl+Maj+C). Le document ouvert, avec ses mod
 
 ### Photos d'identité
 
-Fichier → **Photos d'identité** (Ctrl+Maj+P), à partir d'une photo (JPG, PNG, BMP, GIF ou TIFF) :
+Fichier → **Photos d'identité** (Ctrl+Maj+P), à partir d'une photo (JPEG, PNG, HEIC et HEIF des iPhone, WebP, BMP,
+GIF ou TIFF) :
 
 - sélectionnez la zone (cadre aux bonnes proportions, ovale du visage), zoomez, tronquez, pivotez, redressez, réglez
   la luminosité et le contraste ;
@@ -140,9 +145,12 @@ Téléchargez `PDF Toolkit 2.exe` depuis la page **Releases** de ce dépôt et l
 Développé et testé sous Windows avec Python 3.15, PySide6 6.12 et PyMuPDF 1.28.
 
 ```
-pip install PySide6 pymupdf
+pip install PySide6 pymupdf pillow pillow-heif
 python main.py
 ```
+
+Pillow et pillow-heif ne servent qu'aux photos WebP et HEIC : sans eux, l'application fonctionne et le dit quand on
+choisit une telle photo.
 
 Un PDF peut aussi être passé en argument : `python main.py document.pdf`.
 
@@ -218,3 +226,8 @@ sous licence AGPL : toute personne qui distribue ce logiciel, modifié ou non, d
 - Application écrite par **Claude Code** (Claude Opus 5.5) sous la direction de **Yannick Buchet**.
 - [PyMuPDF](https://pymupdf.readthedocs.io/) (AGPL) pour le traitement des PDF,
   [PySide6 / Qt](https://doc.qt.io/qtforpython/) (LGPL) pour l'interface.
+- Photos WebP et HEIC : [Pillow](https://python-pillow.github.io/) (licence MIT-CMU) et
+  [pillow-heif](https://github.com/bigcat88/pillow_heif) (BSD 3 clauses), qui embarque
+  [libheif](https://github.com/strukturag/libheif) et [libde265](https://github.com/strukturag/libde265)
+  (struktur AG, LGPL v3) et l'encodeur [x265](https://www.x265.org/) (GPL v2 ou ultérieure), dont libheif ne peut se
+  passer. Toutes ces licences sont compatibles avec l'AGPL v3 de l'application.

@@ -4,7 +4,7 @@
 #
 # Taille réduite :
 # - modules Qt superflus retirés (QML, Quick, réseau, OpenGL, PDF de Qt), rendu OpenGL logiciel,
-#   SSL, plugins d'images, styles et traductions de Qt ;
+#   SSL, plugins d'images, styles et traductions de Qt ; de Pillow, seuls le cœur et le WebP sont gardés ;
 # - modules Python jamais chargés par l'application retirés (vérifié en exécutant les tests) ;
 # - bytecode sans docstrings ni assertions (optimize=2).
 #
@@ -17,7 +17,12 @@
 EXCLUDED_MODULES = [
     "tkinter", "unittest", "pydoc", "doctest", "xmlrpc", "sqlite3", "lib2to3",
     "ssl", "_ssl", "_hashlib",  # hashlib se rabat sur ses implémentations intégrées
-    "numpy", "PIL",
+    "numpy",
+    # Pillow et pillow-heif lisent le WebP et le HEIC des iPhone (read_image) : seuls le cœur de Pillow et son
+    # module WebP servent. AVIF (7,9 Mo), polices, Tk et Qt de Pillow sont retirés. pillow-heif impose la DLL de
+    # l'encodeur x265 (22 Mo, 4 Mo compressée) : libheif ne se charge pas sans elle.
+    "PIL._avif", "PIL.AvifImagePlugin", "PIL._imagingft", "PIL.ImageFont", "PIL._imagingtk", "PIL.ImageTk",
+    "PIL.ImageQt",
     # Jamais chargés par l'application ni par PyMuPDF (bz2, lzma, zstd et decimal, eux, le sont).
     # difflib, lui, est nécessaire : il sert à la comparaison de deux PDF.
     "email", "http", "urllib", "xml", "html.parser", "multiprocessing", "asyncio", "concurrent",

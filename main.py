@@ -695,21 +695,113 @@ WHITE_TO_ALPHA = bytes(
 )
 
 
-def load_image(path, transparent_white=False):
-    """Image PNG ou JPG à insérer, lue par PyMuPDF (et non par Qt, dont le lecteur JPEG n'est pas inclus).
+# Formats d'image : PyMuPDF lit JPEG, PNG, GIF, BMP, TIFF et JPEG 2000 ; le HEIC et le HEIF des iPhone sont lus par
+# pillow-heif, le WebP par Pillow (ni Qt ni MuPDF ne les lisent dans l'application construite).
+IMAGE_FILTER = ("Images (*.jpg *.jpeg *.png *.heic *.heif *.webp *.gif *.bmp *.tif *.tiff);;"
+                "Tous les fichiers (*)")
+IMAGE_FORMATS_TEXT = "JPEG, PNG, HEIC et HEIF (iPhone), WebP, GIF, BMP et TIFF"
+HEIF_BRANDS = {b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"hevm", b"hevs", b"mif1", b"msf1"}
+PHOTO_JPEG_QUALITY = 92  # photo HEIC ou WebP réencodée pour le PDF
+# Orientation EXIF -> rotation à donner à insert_image (sens inverse des aiguilles d'une montre). Les orientations
+# en miroir (2, 4, 5, 7) n'y sont pas : l'image est alors redressée pixel par pixel.
+EXIF_INSERT_ROTATION = {1: 0, 3: 180, 6: 270, 8: 90}
 
-    Renvoie (pixmap RVB, fond blanc rendu transparent ?). Sans transparence ajoutée, le fichier
-    d'origine est inséré tel quel (un JPEG reste compressé en JPEG dans le PDF).
+
+def image_format(head):
+    """Format d'une image d'après ses premiers octets (64 suffisent) : le nom du fichier peut être faux."""
+    if head[:3] == b"\xff\xd8\xff":
+        return "jpeg"
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "webp"
+    if head[4:8] == b"ftyp":  # conteneur ISO : HEIF ou AVIF, d'après les marques de la boîte « ftyp »
+        end = min(len(head), int.from_bytes(head[:4], "big"))
+        brands = [head[8:12]] + [head[i:i + 4] for i in range(16, end - 3, 4)]
+        if b"avif" in brands or b"avis" in brands:
+            return "avif"
+        if HEIF_BRANDS.intersection(brands):
+            return "heif"
+    return "autre"
+
+
+def _pillow_pixmap(image):
+    """Image Pillow -> pixmap RVB, avec transparence si elle en a."""
+    alpha = image.mode in ("RGBA", "LA", "PA") or (image.mode == "P" and "transparency" in image.info)
+    image = image.convert("RGBA" if alpha else "RGB")
+    return pymupdf.Pixmap(pymupdf.csRGB, image.width, image.height, image.tobytes(), alpha)
+
+
+def read_image(source):
+    """Image d'un fichier (chemin) ou d'octets : (pixmap RVB, avec ou sans transparence ; format ; orientation).
+
+    orientation : celle de l'EXIF (1 à 8), que l'appelant doit appliquer ; une photo HEIC ou WebP arrive déjà
+    redressée (orientation 1).
     """
-    pix = pymupdf.Pixmap(path)
+    if isinstance(source, str):
+        with open(source, "rb") as f:
+            data = f.read()
+    else:
+        data = bytes(source)
+    kind = image_format(data[:64])
+    if kind == "avif":
+        raise ValueError("le format AVIF n'est pas pris en charge : enregistrez la photo en JPEG ou en PNG.")
+    if kind in ("heif", "webp"):
+        import io
+        try:
+            if kind == "heif":
+                # pillow-heif applique la rotation enregistrée dans la photo (photo d'iPhone prise en hauteur).
+                import pillow_heif
+                return _pillow_pixmap(pillow_heif.open_heif(io.BytesIO(data), convert_hdr_to_8bit=True).to_pillow()), kind, 1
+            from PIL import ImageOps, WebPImagePlugin
+            return _pillow_pixmap(ImageOps.exif_transpose(WebPImagePlugin.WebPImageFile(io.BytesIO(data)))), kind, 1
+        except ImportError:  # lancé depuis les sources sans les modules : pip install pillow pillow-heif
+            raise ValueError(f"le format {'HEIC' if kind == 'heif' else 'WebP'} demande les modules Pillow et "
+                             "pillow-heif (pip install pillow pillow-heif).") from None
+    try:
+        pix = pymupdf.Pixmap(data)
+    except Exception as exc:
+        raise ValueError(f"format d'image non reconnu ({exc}). Formats acceptés : {IMAGE_FORMATS_TEXT}.") from None
     if pix.colorspace is not None and pix.colorspace.n != 3:
         pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+    return pix, kind, exif_orientation(data)
+
+
+def qimage_to_pixmap(image):
+    """QImage -> pixmap RVB de PyMuPDF, avec transparence si l'image en a."""
+    alpha = image.hasAlphaChannel()
+    image = image.convertToFormat(QImage.Format.Format_RGBA8888 if alpha else QImage.Format.Format_RGB888)
+    width, height, line, n = image.width(), image.height(), image.bytesPerLine(), 4 if alpha else 3
+    data = bytes(image.constBits())
+    if line != width * n:  # lignes complétées à un multiple de 4 octets par Qt
+        data = b"".join(data[y * line:y * line + width * n] for y in range(height))
+    return pymupdf.Pixmap(pymupdf.csRGB, width, height, data, alpha)
+
+
+def load_image(path, transparent_white=False):
+    """Image à insérer : (aperçu QImage redressé, arguments de page.insert_image).
+
+    Un fichier que MuPDF lit (JPEG, PNG…) est inséré tel quel : un JPEG reste compressé en JPEG, et la rotation
+    demandée par son EXIF (photo prise en hauteur) est donnée à insert_image (« rotate »). Une photo HEIC ou WebP est
+    réencodée en JPEG (en PNG si elle a des transparences). transparent_white (signature scannée ou photographiée) :
+    le fond blanc devient transparent.
+    """
+    pix, kind, orientation = read_image(path)
     if transparent_white and not pix.alpha:
         gray = pymupdf.Pixmap(pymupdf.csGRAY, pix).samples
         with_alpha = pymupdf.Pixmap(pix, 1)
         with_alpha.set_alpha(gray.translate(WHITE_TO_ALPHA))
-        return with_alpha, True
-    return pix, False
+        pix = with_alpha
+    preview = oriented_image(to_qimage(pix), orientation)
+    if transparent_white:
+        return preview, {"pixmap": pix if orientation == 1 else qimage_to_pixmap(preview)}
+    if kind in ("heif", "webp"):
+        return preview, {"pixmap": pix} if pix.alpha else {"stream": pix.tobytes("jpeg", jpg_quality=PHOTO_JPEG_QUALITY)}
+    if orientation in EXIF_INSERT_ROTATION:
+        return preview, {"filename": path, "rotate": EXIF_INSERT_ROTATION[orientation]}
+    # Photo en miroir (orientation 2, 4, 5 ou 7, rare) : redressée pixel par pixel.
+    fixed = qimage_to_pixmap(preview)
+    return preview, {"pixmap": fixed} if fixed.alpha else {"stream": fixed.tobytes("jpeg", jpg_quality=PHOTO_JPEG_QUALITY)}
 
 
 def to_qimage(pix):
@@ -2015,7 +2107,6 @@ ID_PHOTO_PAPERS = [
     ("Personnalisé", None, None),
 ]
 
-ID_PHOTO_FILTER = "Images (*.jpg *.jpeg *.png *.bmp *.gif *.tif *.tiff)"
 ID_PHOTO_MIN_DPI, ID_PHOTO_MAX_DPI = 300, 600  # résolution de la photo dans le PDF
 ID_PHOTO_LOW_DPI = 250  # en dessous, la photo paraîtra floue une fois imprimée
 ID_PHOTO_JPEG_QUALITY = 95
@@ -2037,11 +2128,14 @@ def mm_text(value):
     return f"{value:g}".replace(".", ",")
 
 
-def exif_orientation(path):
-    """Orientation EXIF (1 à 8) d'une photo JPEG ou TIFF ; 1 si le fichier n'en indique pas."""
+def exif_orientation(source):
+    """Orientation EXIF (1 à 8) d'une photo JPEG ou TIFF (chemin ou octets) ; 1 si elle n'en indique pas."""
     try:
-        with open(path, "rb") as f:
-            data = f.read(256 * 1024)
+        if isinstance(source, str):
+            with open(source, "rb") as f:
+                data = f.read(256 * 1024)
+        else:
+            data = bytes(source[:256 * 1024])
         tiff = data if data[:4] in (b"II*\0", b"MM\0*") else None
         if data[:2] == b"\xff\xd8":
             i = 2
@@ -2064,18 +2158,8 @@ def exif_orientation(path):
     return 1
 
 
-def load_photo(path):
-    """Photo à recadrer, redressée d'après son orientation EXIF (PyMuPDF l'ignore), sur fond blanc si elle est
-    transparente. path : chemin du fichier, ou son contenu (bytes). Renvoie un QImage RVB."""
-    pix, _converted = load_image(path)
-    image = to_qimage(pix)
-    if pix.alpha:
-        flat = QImage(image.size(), QImage.Format.Format_RGB32)
-        flat.fill(Qt.GlobalColor.white)
-        painter = QPainter(flat)
-        painter.drawImage(0, 0, image)
-        painter.end()
-        image = flat.convertToFormat(QImage.Format.Format_RGB888)
+def oriented_image(image, orientation):
+    """L'image redressée d'après son orientation EXIF (1 à 8) : PyMuPDF ne l'applique pas."""
     transform = {
         2: QTransform().scale(-1, 1),
         3: QTransform().rotate(180),
@@ -2084,8 +2168,23 @@ def load_photo(path):
         6: QTransform().rotate(90),
         7: QTransform(0, -1, -1, 0, 0, 0),
         8: QTransform().rotate(270),
-    }.get(exif_orientation(path) if isinstance(path, str) else 1)
+    }.get(orientation)
     return image if transform is None else image.transformed(transform)
+
+
+def load_photo(path):
+    """Photo à recadrer, redressée, sur fond blanc si elle est transparente. path : chemin du fichier, ou son
+    contenu (bytes). Formats : ceux de read_image, photos HEIC des iPhone comprises. Renvoie un QImage RVB."""
+    pix, _kind, orientation = read_image(path)
+    image = to_qimage(pix)
+    if pix.alpha:
+        flat = QImage(image.size(), QImage.Format.Format_RGB32)
+        flat.fill(Qt.GlobalColor.white)
+        painter = QPainter(flat)
+        painter.drawImage(0, 0, image)
+        painter.end()
+        image = flat.convertToFormat(QImage.Format.Format_RGB888)
+    return oriented_image(image, orientation)
 
 
 def adjust_image(image, brightness, contrast):
@@ -6125,15 +6224,18 @@ class PdfEditor(QMainWindow):
         if self.doc is None:
             return
         what = "signature" if signature else "image"
-        path, _ = QFileDialog.getOpenFileName(self, f"Insérer une {what}", "", "Images (*.png *.jpg *.jpeg)")
+        path, _ = QFileDialog.getOpenFileName(self, f"Insérer une {what}", "", IMAGE_FILTER)
         if not path:
             return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             # Signature scannée ou photographiée : le fond blanc devient transparent.
-            pix, converted = load_image(path, transparent_white=signature)
+            preview, source = load_image(path, transparent_white=signature)
         except Exception as exc:
             QMessageBox.critical(self, "Erreur", f"Impossible de lire l'image :\n{path}\n\n{exc}")
             return
+        finally:
+            QApplication.restoreOverrideCursor()
         for widget in self.pages:  # une seule image en cours de placement à la fois
             widget.end_placement(False)
 
@@ -6141,7 +6243,7 @@ class PdfEditor(QMainWindow):
         widget = self.pages[index]
         page_w, page_h = widget.width() / self.zoom, widget.height() / self.zoom
         # Taille naturelle à 150 ppp, limitée à la moitié de la page (un tiers de sa largeur pour une signature).
-        w, h = pix.width * 72 / 150, pix.height * 72 / 150
+        w, h = preview.width() * 72 / 150, preview.height() * 72 / 150
         scale = min(1, page_w * (0.3 if signature else 0.5) / w, page_h * 0.5 / h)
         w, h = w * scale, h * scale
         # Centrée dans la partie visible de la page.
@@ -6151,8 +6253,8 @@ class PdfEditor(QMainWindow):
         cx, cy = page_w / 2, (visible_top + visible_bottom) / 2 / self.zoom
         rect = (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
 
-        self.pending_image = {"path": path, "pixmap": pix if converted else None, "signature": signature}
-        widget.start_placement(to_qimage(pix), rect)
+        self.pending_image = {"source": source, "signature": signature}
+        widget.start_placement(preview, rect)
         self.statusBar().showMessage(
             f"Faites glisser la {what} pour la déplacer et ses coins pour la redimensionner "
             "(Maj : sans garder les proportions), puis Entrée ou « Valider ». Échap pour annuler."
@@ -6165,11 +6267,13 @@ class PdfEditor(QMainWindow):
         page = self.doc[page_index]
         rect = pymupdf.Rect(view_rect) * page.derotation_matrix
         what = "signature" if pending["signature"] else "image"
-        source = {"pixmap": pending["pixmap"]} if pending["pixmap"] is not None else {"filename": pending["path"]}
+        source = dict(pending["source"])
+        # rotate : l'image reste droite à l'écran sur une page pivotée, et une photo JPEG prise en hauteur est
+        # redressée d'après son EXIF.
+        rotate = (page.rotation + source.pop("rotate", 0)) % 360
         self.push_undo(f"insertion d'une {what}")
         try:
-            # rotate : l'image reste droite à l'écran sur une page pivotée.
-            page.insert_image(rect, rotate=page.rotation, keep_proportion=False, **source)
+            page.insert_image(rect, rotate=rotate, keep_proportion=False, **source)
         except Exception as exc:
             _label, *state = self.undo_stack.pop()
             self._restore(*state)
@@ -6631,15 +6735,14 @@ class PdfEditor(QMainWindow):
 
     def id_photo_dialog(self):
         """Prépare une photo d'identité et ouvre la feuille de photos générée comme un nouveau document."""
-        path, _ = QFileDialog.getOpenFileName(self, "Choisir une photo", "", ID_PHOTO_FILTER)
+        path, _ = QFileDialog.getOpenFileName(self, "Choisir une photo", "", IMAGE_FILTER)
         if not path:
             return
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             image = load_photo(path)
         except Exception as exc:
-            QMessageBox.critical(self, "Erreur", f"Impossible de lire l'image :\n{path}\n\n{exc}\n\n"
-                                 "Les photos HEIC ou WebP doivent d'abord être enregistrées en JPEG ou en PNG.")
+            QMessageBox.critical(self, "Erreur", f"Impossible de lire l'image :\n{path}\n\n{exc}")
             return
         finally:
             QApplication.restoreOverrideCursor()

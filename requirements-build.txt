@@ -1,4 +1,6 @@
 # Versions utilisées pour construire l'exécutable (voir .github/workflows/build.yml)
 PySide6==6.12.0
 pymupdf==1.28.2
+pillow==13.0.0
+pillow-heif==1.8.1
 pyinstaller==6.22.3
