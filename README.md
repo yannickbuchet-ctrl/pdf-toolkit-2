@@ -21,6 +21,27 @@ remplir les formulaires, signer, protéger par mot de passe et compresser vos do
 - **Remplir les formulaires** : champs texte, cases à cocher et listes de choix.
 - **Images et signatures** : insérez une image ou une signature (PNG, JPG), placez-la et redimensionnez-la à la
   souris ; le fond blanc d'une signature scannée devient transparent.
+- **Photos d'identité** : à partir d'une photo, sélectionnez la zone (cadre aux bonnes proportions, ovale du visage),
+  zoomez, tronquez, pivotez, redressez, réglez la luminosité et le contraste. Choisissez le format (France et Union
+  européenne, Royaume-Uni, États-Unis, Canada, Chine, Japon, Australie ou sur mesure) et le papier (10 × 15 cm,
+  13 × 18 cm, A6, A5, A4, Lettre ou sur mesure) : le PDF porte autant de photos que la feuille peut en contenir, ou le
+  nombre demandé, et s'imprime à leur taille exacte, sans mise à l'échelle. La marge et l'espacement ne changent que le
+  nombre de photos, jamais leur taille. Une planche enregistrée se modifie ensuite (« Modifier la planche », Ctrl+Maj+M) :
+  la photo entière et les réglages sont joints au PDF, sauf si vous décochez cette option avant de transmettre le fichier.
+- **Comparer deux PDF** (Fichier → Comparer deux PDF, Ctrl+Maj+C) : les deux versions d'un document s'affichent côte
+  à côte, avec les différences surlignées : mots ajoutés en vert, supprimés en rouge, modifiés en orange, et images,
+  dessins, couleurs, surlignages ou mise en page changés encadrés en violet. Les pages ajoutées ou supprimées sont repérées sans décaler la
+  suite, et un paragraphe qui passe à la page suivante n'est pas compté comme une différence. La liste des
+  différences, regroupées par page avec leur nombre par type, mène directement à chacune (F3 et Maj+F3 pour passer à
+  la suivante ou à la précédente) ; le défilement et le zoom des deux versions restent synchronisés. Options : ignorer
+  les majuscules, la ponctuation, comparer le texte seul ou l'aspect seul, tolérance de la comparaison visuelle. Les
+  PDF scannés, sans texte, sont comparés par leur aspect. L'affichage « Superposées » montre les deux versions en une
+  seule page : ce qui n'est que dans l'ancienne en rouge, ce qui n'est que dans la nouvelle en vert. Le réglage « Plan
+  technique » compare deux fois plus finement, pour les plans et les circuits imprimés (couches Gerber imprimées en
+  PDF) : une piste décalée de quelques centièmes de millimètre ou un via agrandi sont trouvés, et chaque changement est
+  situé en millimètres. Les couches (F.Cu, B.Cu, Top Layer…) sont reconnues et nommées. Un rapport PDF des différences
+  (synthèse, liste numérotée, pages annotées et gros plans de chaque différence avec la superposition) peut être
+  enregistré. Le document ouvert, avec ses modifications, est proposé comme première version.
 - **Mots de passe** : ouverture des PDF protégés, protection par mot de passe (chiffrement AES 256 bits).
 - **Compression à l'enregistrement** : sans perte, ou forte (images réduites) pour l'envoi par e-mail.
 - **Annuler et rétablir** chaque opération, zoom (Ctrl + molette, autour du point sous la souris), aller à une

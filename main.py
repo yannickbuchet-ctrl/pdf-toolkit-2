@@ -1,24 +1,33 @@
+import ast
+import difflib
 import glob
 import hashlib
 import html
+import math
 import os
 import re
 import struct
 import sys
+import threading
+import time
 
 import pymupdf
-from PySide6.QtCore import QByteArray, QEvent, QMimeData, QPoint, QRectF, QSize, Qt, QTimer, QUrl, QUrlQuery, Signal
+from PySide6.QtCore import (
+    QByteArray, QEvent, QMimeData, QPoint, QPointF, QRectF, QSize, QSizeF, Qt, QTimer, QUrl, QUrlQuery, Signal,
+)
 from PySide6.QtGui import (
     QAction, QColor, QDesktopServices, QDrag, QFont, QFontDatabase, QIcon, QImage, QKeySequence, QLinearGradient,
-    QPageLayout, QPainter, QPainterPath, QPen, QPixmap, QTransform,
+    QPageLayout, QPageSize, QPainter, QPainterPath, QPen, QPixmap, QTransform,
 )
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGraphicsDropShadowEffect,
@@ -33,9 +42,13 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSlider,
+    QSpinBox,
+    QSplitter,
     QStackedWidget,
     QToolBar,
     QVBoxLayout,
@@ -86,13 +99,13 @@ ICONS = {
     "save": ("💾", ACCENT),
     "edit": ("✎", ACCENT),
     "pages": ("▦", ACCENT),
-    "zoom_in": ("⊕", SLATE),
-    "zoom_out": ("⊖", SLATE),
     "print": ("🖶", ACCENT),
     "form": ("☑", ACCENT),
     "lock": ("🔒", ACCENT),
     "image": ("🖼", ACCENT),
     "signature": ("✍", ACCENT),
+    "id_photo": ("👤", ACCENT),
+    "crop": ("✂", ACCENT),
 }
 
 PRINT_DPI = 300  # au-delà, le fichier envoyé à l'imprimante grossit sans gain visible
@@ -170,8 +183,70 @@ QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 """
 
 
+def zoom_icon(plus):
+    """Loupe aux couleurs de l'application, avec un signe + ou −, dessinée pour chaque taille d'affichage : le symbole
+    reste net même en petit."""
+    icon = QIcon()
+    for size in (18, 22, 32, 44, 64):
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.scale(size / 64, size / 64)  # dessin sur une grille de 64 × 64
+        center, radius = QPointF(27, 27), 23
+
+        # Manche, sous le verre.
+        painter.setPen(QPen(QColor("#4338ca"), 10, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawLine(QPointF(44, 44), QPointF(57, 57))
+
+        # Verre : même dégradé que le bandeau de l'écran d'accueil.
+        gradient = QLinearGradient(4, 4, 50, 50)
+        gradient.setColorAt(0, QColor("#3b82f6"))
+        gradient.setColorAt(1, QColor("#7c3aed"))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(gradient)
+        painter.drawEllipse(center, radius, radius)
+
+        # Signe.
+        painter.setPen(QPen(QColor("#ffffff"), 7, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawLine(QPointF(center.x() - 11, center.y()), QPointF(center.x() + 11, center.y()))
+        if plus:
+            painter.drawLine(QPointF(center.x(), center.y() - 11), QPointF(center.x(), center.y() + 11))
+        painter.end()
+        icon.addPixmap(pixmap)
+    return icon
+
+
+def compare_icon():
+    """Deux pages côte à côte, aux couleurs de l'application, l'une avec un passage surligné : comparer deux PDF."""
+    icon = QIcon()
+    for size in (18, 22, 32, 44, 64):
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.scale(size / 64, size / 64)  # dessin sur une grille de 64 × 64
+        for x, color in ((4, "#3b82f6"), (34, "#7c3aed")):
+            painter.setPen(QPen(QColor(color), 4))
+            painter.setBrush(QColor("#ffffff"))
+            painter.drawRoundedRect(QRectF(x, 8, 26, 48), 4, 4)
+            painter.setPen(QPen(QColor(color), 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            for y in (20, 30, 40):
+                painter.drawLine(QPointF(x + 7, y), QPointF(x + 19, y))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(234, 122, 0, 200))  # passage modifié, surligné
+        painter.drawRoundedRect(QRectF(37, 25, 20, 10), 2, 2)
+        painter.end()
+        icon.addPixmap(pixmap)
+    return icon
+
+
 def make_icon(name):
     """Icône dessinée à partir d'un symbole Unicode (aucun fichier image nécessaire)."""
+    if name in ("zoom_in", "zoom_out"):
+        return zoom_icon(name == "zoom_in")
+    if name == "compare":
+        return compare_icon()
     glyph, color = ICONS[name]
     pixmap = QPixmap(64, 64)  # grande taille : reste net sur les écrans haute résolution
     pixmap.fill(Qt.GlobalColor.transparent)
@@ -1109,6 +1184,20 @@ class PagesContainer(QWidget):
 
     BACKGROUND = QColor("#e5e9f0")
 
+    def childEvent(self, event):
+        super().childEvent(event)
+        if event.added():
+            event.child().installEventFilter(self)
+        elif event.removed():
+            self.update()
+
+    def eventFilter(self, watched, event):
+        # L'ombre déborde de la page : quand celle-ci change de taille ou de place, Qt ne repeint que la zone de la page
+        # et l'ancienne ombre resterait à l'écran. Le fond est donc repeint en entier.
+        if event.type() in (QEvent.Type.Move, QEvent.Type.Resize, QEvent.Type.Show, QEvent.Type.Hide):
+            self.update()
+        return False
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(event.rect(), self.BACKGROUND)
@@ -1902,6 +1991,3210 @@ class SearchBar(QWidget):
             self.find_edit.style().polish(self.find_edit)
 
 
+# --- Photos d'identité -------------------------------------------------------
+
+# (libellé, largeur et hauteur de la photo en mm, hauteur de la tête en mm : minimum et maximum)
+ID_PHOTO_FORMATS = [
+    ("France, Union européenne (35 × 45 mm)", 35, 45, 32, 36),
+    ("Royaume-Uni (35 × 45 mm)", 35, 45, 29, 34),
+    ("États-Unis, Inde (51 × 51 mm)", 50.8, 50.8, 25, 35),
+    ("Canada, passeport (50 × 70 mm)", 50, 70, 31, 36),
+    ("Chine, visa (33 × 48 mm)", 33, 48, 28, 33),
+    ("Japon, Australie (35 × 45 mm)", 35, 45, 32, 36),
+    ("Personnalisé", None, None, None, None),
+]
+
+# (libellé, largeur et hauteur de la feuille en mm)
+ID_PHOTO_PAPERS = [
+    ("Photo 10 × 15 cm", 101.6, 152.4),  # le papier vendu sous ce nom mesure en réalité 4 × 6 pouces
+    ("Photo 13 × 18 cm", 127, 178),
+    ("A6 (10,5 × 14,8 cm)", 105, 148),
+    ("A5 (14,8 × 21 cm)", 148, 210),
+    ("A4 (21 × 29,7 cm)", 210, 297),
+    ("Lettre US (21,6 × 27,9 cm)", 215.9, 279.4),
+    ("Personnalisé", None, None),
+]
+
+ID_PHOTO_FILTER = "Images (*.jpg *.jpeg *.png *.bmp *.gif *.tif *.tiff)"
+ID_PHOTO_MIN_DPI, ID_PHOTO_MAX_DPI = 300, 600  # résolution de la photo dans le PDF
+ID_PHOTO_LOW_DPI = 250  # en dessous, la photo paraîtra floue une fois imprimée
+ID_PHOTO_JPEG_QUALITY = 95
+ID_PHOTO_PREVIEW = 2400  # plus grand côté de l'image affichée pendant le recadrage, en pixels
+ID_PHOTO_MAX_ANGLE = 15  # redressement maximal, en degrés
+ID_PHOTO_HISTORY = 20  # opérations annulables dans la fenêtre
+ID_PHOTO_MIN_MARGIN = 3  # mm : plus près du bord, la plupart des imprimantes couperaient les photos
+ID_PHOTO_SOURCE_QUALITY = 92  # photo entière jointe au PDF pour pouvoir modifier la planche
+ID_PHOTO_TITLE = "Photos d'identité"
+# Fichiers joints au PDF : la photo entière (réencodée, donc sans ses métadonnées) et les réglages de la planche.
+ID_PHOTO_SOURCE_FILE = "photo-identite-source.jpg"
+ID_PHOTO_SETTINGS_FILE = "photo-identite-reglages.txt"
+ID_PHOTO_MAX_OPS = 200  # opérations relues au plus dans un PDF
+POINTS_PER_MM = 72 / 25.4
+
+
+def mm_text(value):
+    """Une dimension à la française : 50,8 ; 35."""
+    return f"{value:g}".replace(".", ",")
+
+
+def exif_orientation(path):
+    """Orientation EXIF (1 à 8) d'une photo JPEG ou TIFF ; 1 si le fichier n'en indique pas."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read(256 * 1024)
+        tiff = data if data[:4] in (b"II*\0", b"MM\0*") else None
+        if data[:2] == b"\xff\xd8":
+            i = 2
+            while tiff is None and i + 4 <= len(data) and data[i] == 0xFF and data[i + 1] not in (0xDA, 0xD9):
+                length = int.from_bytes(data[i + 2:i + 4], "big")
+                if data[i + 1] == 0xE1 and data[i + 4:i + 10] == b"Exif\0\0":
+                    tiff = data[i + 10:i + 2 + length]
+                i += 2 + length
+        if tiff is None:
+            return 1
+        order = "little" if tiff[:2] == b"II" else "big"
+        ifd = int.from_bytes(tiff[4:8], order)
+        for k in range(int.from_bytes(tiff[ifd:ifd + 2], order)):
+            entry = tiff[ifd + 2 + 12 * k:ifd + 14 + 12 * k]
+            if int.from_bytes(entry[:2], order) == 0x0112:
+                orientation = int.from_bytes(entry[8:10], order)
+                return orientation if 1 <= orientation <= 8 else 1
+    except (OSError, ValueError):
+        pass
+    return 1
+
+
+def load_photo(path):
+    """Photo à recadrer, redressée d'après son orientation EXIF (PyMuPDF l'ignore), sur fond blanc si elle est
+    transparente. path : chemin du fichier, ou son contenu (bytes). Renvoie un QImage RVB."""
+    pix, _converted = load_image(path)
+    image = to_qimage(pix)
+    if pix.alpha:
+        flat = QImage(image.size(), QImage.Format.Format_RGB32)
+        flat.fill(Qt.GlobalColor.white)
+        painter = QPainter(flat)
+        painter.drawImage(0, 0, image)
+        painter.end()
+        image = flat.convertToFormat(QImage.Format.Format_RGB888)
+    transform = {
+        2: QTransform().scale(-1, 1),
+        3: QTransform().rotate(180),
+        4: QTransform().scale(1, -1),
+        5: QTransform(0, 1, 1, 0, 0, 0),
+        6: QTransform().rotate(90),
+        7: QTransform(0, -1, -1, 0, 0, 0),
+        8: QTransform().rotate(270),
+    }.get(exif_orientation(path) if isinstance(path, str) else 1)
+    return image if transform is None else image.transformed(transform)
+
+
+def adjust_image(image, brightness, contrast):
+    """Luminosité et contraste (-50 à 50), appliqués à tous les pixels par une table de correspondance."""
+    if not brightness and not contrast:
+        return image
+    factor = 1 + contrast / 100
+    table = bytes(max(0, min(255, round((v - 128) * factor + 128 + brightness))) for v in range(256))
+    image = image.convertToFormat(QImage.Format.Format_RGB888)
+    data = bytes(image.constBits()).translate(table)
+    return QImage(data, image.width(), image.height(), image.bytesPerLine(), QImage.Format.Format_RGB888).copy()
+
+
+def jpeg_bytes(image, quality=ID_PHOTO_JPEG_QUALITY):
+    """QImage -> JPEG, encodé par PyMuPDF (le lecteur et l'encodeur JPEG de Qt ne sont pas inclus)."""
+    image = image.convertToFormat(QImage.Format.Format_RGB888)
+    width, height, stride = image.width(), image.height(), image.bytesPerLine()
+    bits = image.constBits()
+    # Qt complète chaque ligne à un multiple de 4 octets ; PyMuPDF attend des lignes sans remplissage.
+    samples = b"".join(bytes(bits[y * stride:y * stride + width * 3]) for y in range(height))
+    pix = pymupdf.Pixmap(pymupdf.csRGB, width, height, samples, False)
+    return pix.tobytes("jpeg", jpg_quality=quality)
+
+
+def id_photo_layout(paper, photo, margin, gap, orientation="auto", count=0):
+    """Dispose les photos sur la feuille, le bloc étant centré (toutes les dimensions en mm).
+
+    paper, photo : (largeur, hauteur). orientation : "auto" (celle qui contient le plus de photos), "portrait" ou
+    "landscape". count : nombre de photos voulu, 0 pour remplir la feuille.
+    Renvoie (largeur de la page, hauteur de la page, capacité, [(x, y) de chaque photo]).
+    """
+    def grid(page_w, page_h):
+        # La tolérance évite de perdre une rangée à cause d'un arrondi quand tout tient au dixième de mm près.
+        columns = int((page_w - 2 * margin + gap + 1e-6) // (photo[0] + gap))
+        rows = int((page_h - 2 * margin + gap + 1e-6) // (photo[1] + gap))
+        return max(columns, 0), max(rows, 0)
+
+    portrait = min(paper), max(paper)
+    landscape = max(paper), min(paper)
+    if orientation == "portrait":
+        page = portrait
+    elif orientation == "landscape":
+        page = landscape
+    else:
+        portrait_columns, portrait_rows = grid(*portrait)
+        landscape_columns, landscape_rows = grid(*landscape)
+        page = landscape if landscape_columns * landscape_rows > portrait_columns * portrait_rows else portrait
+    columns, rows = grid(*page)
+    capacity = columns * rows
+    if not capacity:
+        return page[0], page[1], 0, []
+    left = (page[0] - columns * photo[0] - (columns - 1) * gap) / 2
+    top = (page[1] - rows * photo[1] - (rows - 1) * gap) / 2
+    positions = [(left + c * (photo[0] + gap), top + r * (photo[1] + gap)) for r in range(rows) for c in range(columns)]
+    return page[0], page[1], capacity, positions[:count] if count else positions
+
+
+def id_photo_pdf(image, page_size, photo, positions, cut_lines, source=None):
+    """PDF d'une page portant la photo à chaque position (dimensions en mm).
+
+    Le PDF demande à être imprimé sans mise à l'échelle (/PrintScaling /None) : les photos doivent sortir à leur
+    taille exacte. Une même image est partagée par toutes les photos, le fichier reste léger.
+    source : (JPEG de la photo entière, texte des réglages), joints au PDF pour pouvoir modifier la planche.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=page_size[0] * POINTS_PER_MM, height=page_size[1] * POINTS_PER_MM)
+    jpeg = jpeg_bytes(image)
+    xref = 0
+    for x, y in positions:
+        rect = pymupdf.Rect(x, y, x + photo[0], y + photo[1]) * POINTS_PER_MM
+        if xref:
+            page.insert_image(rect, xref=xref, keep_proportion=False)
+        else:
+            xref = page.insert_image(rect, stream=jpeg, keep_proportion=False)
+        if cut_lines:
+            page.draw_rect(rect, color=(0.6, 0.6, 0.6), width=0.25)
+    doc.set_metadata({"title": ID_PHOTO_TITLE, "creator": APP_NAME, "producer": APP_NAME})
+    doc.xref_set_key(doc.pdf_catalog(), "ViewerPreferences", "<</PrintScaling/None>>")
+    if source is not None:
+        doc.embfile_add(ID_PHOTO_SOURCE_FILE, source[0], filename=ID_PHOTO_SOURCE_FILE,
+                        desc="Photo entière, pour modifier la planche dans " + APP_NAME)
+        doc.embfile_add(ID_PHOTO_SETTINGS_FILE, source[1].encode("utf-8"), filename=ID_PHOTO_SETTINGS_FILE,
+                        desc="Réglages de la planche pour " + APP_NAME)
+    return doc
+
+
+def sheet_photos(page):
+    """Rectangles des photos d'une planche : toutes la même image, à la même taille. None si la page en diffère."""
+    infos = page.get_image_info(xrefs=True)
+    if not infos or len({info["xref"] for info in infos}) != 1:
+        return None
+    boxes = [info["bbox"] for info in infos]
+    w, h = boxes[0][2] - boxes[0][0], boxes[0][3] - boxes[0][1]
+    if any(abs(box[2] - box[0] - w) > 0.5 or abs(box[3] - box[1] - h) > 0.5 for box in boxes):
+        return None
+    return boxes
+
+
+def is_id_photo_sheet(doc):
+    """Ce PDF est-il une planche de photos d'identité créée par l'application ?"""
+    try:
+        if len(doc) == 0:
+            return False
+        names = doc.embfile_names()
+        if ID_PHOTO_SOURCE_FILE in names and ID_PHOTO_SETTINGS_FILE in names:
+            return True
+        return ((doc.metadata or {}).get("title") == ID_PHOTO_TITLE and prints_actual_size(doc)
+                and sheet_photos(doc[0]) is not None)
+    except (RuntimeError, ValueError):
+        return False
+
+
+def page_sheet_settings(page):
+    """Réglages déduits de la page, pour une planche sans réglages joints."""
+    boxes = sheet_photos(page)
+    photo = ((boxes[0][2] - boxes[0][0]) / POINTS_PER_MM, (boxes[0][3] - boxes[0][1]) / POINTS_PER_MM)
+    page_w, page_h = page.rect.width / POINTS_PER_MM, page.rect.height / POINTS_PER_MM
+    lefts = sorted({round(box[0] / POINTS_PER_MM, 2) for box in boxes})
+    tops = sorted({round(box[1] / POINTS_PER_MM, 2) for box in boxes})
+    if len(lefts) > 1:
+        gap = lefts[1] - lefts[0] - photo[0]
+    else:
+        gap = tops[1] - tops[0] - photo[1] if len(tops) > 1 else 2
+    margin = min(min(lefts), min(tops), page_w - max(lefts) - photo[0], page_h - max(tops) - photo[1])
+    margin = max(margin, ID_PHOTO_MIN_MARGIN)
+    orientation = "landscape" if page_w > page_h else "portrait"
+    paper = (min(page_w, page_h), max(page_w, page_h))
+    capacity = id_photo_layout(paper, photo, margin, gap, orientation)[2]
+    return {"photo": photo, "paper": paper, "orientation": orientation, "margin": margin, "gap": gap,
+            "count": 0 if len(boxes) >= capacity else len(boxes), "cut_lines": bool(page.get_drawings())}
+
+
+def read_id_photo_sheet(doc):
+    """Ce qu'il faut pour modifier une planche : (photo, réglages, complet).
+
+    complet : False si le PDF ne contient que la photo déjà recadrée, sans ce qui était hors du cadre.
+    """
+    names = doc.embfile_names()
+    if ID_PHOTO_SOURCE_FILE in names and ID_PHOTO_SETTINGS_FILE in names:
+        try:
+            settings = ast.literal_eval(doc.embfile_get(ID_PHOTO_SETTINGS_FILE).decode("utf-8"))
+            if isinstance(settings, dict):
+                return load_photo(doc.embfile_get(ID_PHOTO_SOURCE_FILE)), settings, True
+        except Exception:  # pièces jointes abîmées : on se rabat sur la photo visible dans la page
+            pass
+    page = doc[0]
+    xref = page.get_image_info(xrefs=True)[0]["xref"]
+    return load_photo(doc.extract_image(xref)["image"]), page_sheet_settings(page), False
+
+
+def finite_numbers(value, count):
+    """Le tuple de count nombres finis lu dans un PDF, ou None : un fichier reçu peut contenir n'importe quoi."""
+    if not isinstance(value, (tuple, list)) or len(value) != count:
+        return None
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in value):
+        return None
+    return tuple(value)
+
+
+def quarter_turn_needed(w, h, paper_w, paper_h, tolerance):
+    """Une page en taille réelle doit-elle être tournée pour tenir sur le papier ? (Seulement si c'est indispensable.)
+    La tolérance couvre les arrondis des pilotes (A4 : 595 points au lieu de 595,28)."""
+    room_w, room_h = paper_w + tolerance, paper_h + tolerance
+    return (w > room_w or h > room_h) and h <= room_w and w <= room_h
+
+
+def photos_outside_printable(page, paper, printable):
+    """Des images de la page, imprimée en taille réelle et centrée sur le papier, sortent-elles de la zone que
+    l'imprimante peut atteindre ? paper, printable : QRectF en points, printable étant relatif au coin du papier."""
+    center = page.rect.width / 2, page.rect.height / 2
+    boxes = [info["bbox"] for info in page.get_image_info()] or [tuple(page.rect)]
+    reach_x = max(max(abs(box[0] - center[0]), abs(box[2] - center[0])) for box in boxes)
+    reach_y = max(max(abs(box[1] - center[1]), abs(box[3] - center[1])) for box in boxes)
+    if quarter_turn_needed(page.rect.width, page.rect.height, paper.width(), paper.height(), 2):
+        reach_x, reach_y = reach_y, reach_x
+    tolerance = 0.5  # points : arrondis des pilotes
+    return (paper.width() / 2 - reach_x < printable.left() - tolerance
+            or paper.width() / 2 + reach_x > printable.right() + tolerance
+            or paper.height() / 2 - reach_y < printable.top() - tolerance
+            or paper.height() / 2 + reach_y > printable.bottom() + tolerance)
+
+
+def prints_actual_size(doc):
+    """Le PDF demande-t-il à être imprimé sans mise à l'échelle (/PrintScaling /None) ?"""
+    try:
+        kind, value = doc.xref_get_key(doc.pdf_catalog(), "ViewerPreferences")
+        if kind == "xref":
+            value = doc.xref_object(int(value.split()[0]))
+    except (RuntimeError, ValueError):
+        return False
+    return re.search(r"/PrintScaling\s*/None", value) is not None
+
+
+class PhotoCropView(QWidget):
+    """Photo et zone sélectionnée : le cadre se déplace et se redimensionne à la souris, ses proportions sont celles
+    de la photo d'identité (libres en mode « tronquer »). Molette : zoom sous la souris ; clic droit : déplacer la vue.
+
+    Les positions sont en pixels de l'image, avec pour origine son centre : une inclinaison tourne l'image autour de
+    ce point sans déplacer le cadre.
+    """
+
+    changed = Signal()
+    GRAB = 10  # distance de saisie d'un coin ou d'un bord du cadre, en pixels de l'écran
+
+    def __init__(self, image):
+        super().__init__()
+        self.ratio = 35 / 45  # largeur / hauteur du cadre
+        self.head = None  # hauteur de la tête rapportée à celle de la photo : (minimum, maximum), pour le guide
+        self.show_guide = True
+        self.free = False  # mode « tronquer » : proportions libres
+        self.saved_selection = None
+        self.brightness = 0
+        self.contrast = 0
+        self.zoom = 1.0
+        self.center = QPointF()  # point de l'image au centre de la vue
+        self.drag = None
+        self.setMinimumSize(420, 360)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.set_state(image, 0.0, None)
+
+    # --- État ---------------------------------------------------------------
+
+    def state(self):
+        return self.image, self.angle, QRectF(self.selection)
+
+    def set_state(self, image, angle, selection):
+        self.image = image
+        self.angle = angle
+        longest = max(image.width(), image.height())
+        self.preview = image
+        if longest > ID_PHOTO_PREVIEW:
+            self.preview = image.scaled(ID_PHOTO_PREVIEW, ID_PHOTO_PREVIEW, Qt.AspectRatioMode.KeepAspectRatio,
+                                        Qt.TransformationMode.SmoothTransformation)
+        self.display = adjust_image(self.preview, self.brightness, self.contrast)
+        self.zoom = 1.0
+        self.center = QPointF()
+        # Un cadre mémorisé repart aux proportions actuelles : le format a pu changer depuis.
+        self._set_selection(selection if selection is not None else self.default_selection())
+
+    def default_selection(self):
+        """La plus grande zone aux bonnes proportions, centrée dans l'image."""
+        w, h = self.image.width(), self.image.height()
+        if self.ratio > w / h:
+            h = w / self.ratio
+        else:
+            w = h * self.ratio
+        return QRectF(-w / 2, -h / 2, w, h)
+
+    def set_adjustments(self, brightness, contrast):
+        self.brightness, self.contrast = brightness, contrast
+        self.display = adjust_image(self.preview, brightness, contrast)
+        self.update()
+        self.changed.emit()
+
+    def set_angle(self, angle):
+        self.angle = angle
+        self._set_selection(self.selection)
+        self._clamp_center()
+        self.update()
+
+    def set_ratio(self, ratio):
+        """Nouvelles proportions : le cadre garde son centre et, autant que possible, sa hauteur."""
+        if abs(ratio - self.ratio) < 1e-9:
+            return
+        self.ratio = ratio
+        if self.free:  # appliquées à la sortie du mode « tronquer »
+            return
+        center, h = self.selection.center(), self.selection.height()
+        bounds = self.bounds()
+        h = min(h, bounds.height(), bounds.width() / ratio)
+        w = h * ratio
+        self._set_selection(QRectF(center.x() - w / 2, center.y() - h / 2, w, h))
+
+    def set_guide(self, head, visible):
+        self.head, self.show_guide = head, visible
+        self.update()
+
+    def begin_free(self):
+        """Mode « tronquer » : toute l'image est sélectionnée, aux proportions libres."""
+        self.free = True
+        self.saved_selection = QRectF(self.selection)
+        self.selection = self.bounds()
+        self.update()
+        self.changed.emit()
+
+    def end_free(self, apply):
+        """Quitte le mode « tronquer » ; apply : l'image est réduite à la zone sélectionnée, redressement inclus."""
+        self.free = False
+        if apply:
+            cropped = self.render(max(1, round(self.selection.width())), max(1, round(self.selection.height())),
+                                  adjusted=False)
+            self.set_state(cropped, 0.0, None)
+        else:
+            self._set_selection(self.saved_selection)
+
+    # --- Géométrie ----------------------------------------------------------
+
+    def bounds(self):
+        """Rectangle contenant toute l'image inclinée : le cadre ne peut pas en sortir."""
+        angle = math.radians(self.angle)
+        cos, sin = abs(math.cos(angle)), abs(math.sin(angle))
+        w, h = self.image.width(), self.image.height()
+        half_w, half_h = (w * cos + h * sin) / 2, (w * sin + h * cos) / 2
+        return QRectF(-half_w, -half_h, 2 * half_w, 2 * half_h)
+
+    def covers_image(self):
+        """Le cadre reste-t-il dans l'image ? (Une image inclinée laisse des coins vides, imprimés en blanc.)"""
+        inverse = QTransform().rotate(-self.angle)
+        half_w, half_h = self.image.width() / 2 + 0.5, self.image.height() / 2 + 0.5
+        rect = self.selection
+        for corner in (rect.topLeft(), rect.topRight(), rect.bottomLeft(), rect.bottomRight()):
+            point = inverse.map(corner)
+            if abs(point.x()) > half_w or abs(point.y()) > half_h:
+                return False
+        return True
+
+    def _set_selection(self, rect):
+        """Applique un cadre, réduit si besoin puis ramené dans les limites de l'image."""
+        bounds = self.bounds()
+        w, h = rect.width(), rect.height()
+        if self.free:
+            w, h = min(w, bounds.width()), min(h, bounds.height())
+        else:
+            h = min(h, bounds.height(), bounds.width() / self.ratio)
+            w = h * self.ratio
+        x = max(bounds.left(), min(rect.center().x() - w / 2, bounds.right() - w))
+        y = max(bounds.top(), min(rect.center().y() - h / 2, bounds.bottom() - h))
+        self.selection = QRectF(x, y, w, h)
+        self.update()
+        self.changed.emit()
+
+    def _scale(self):
+        """Pixels de l'écran par pixel de l'image."""
+        bounds = self.bounds()
+        fit = min((self.width() - 24) / bounds.width(), (self.height() - 24) / bounds.height())
+        return max(fit, 1e-4) * self.zoom
+
+    def _to_view(self, point):
+        return QPointF(self.width() / 2, self.height() / 2) + (point - self.center) * self._scale()
+
+    def _to_photo(self, point):
+        return self.center + (point - QPointF(self.width() / 2, self.height() / 2)) / self._scale()
+
+    def _view_selection(self):
+        return QRectF(self._to_view(self.selection.topLeft()), self._to_view(self.selection.bottomRight()))
+
+    def _clamp_center(self):
+        bounds, scale = self.bounds(), self._scale()
+        half_w, half_h = self.width() / 2 / scale, self.height() / 2 / scale
+        x = 0.0 if bounds.width() <= 2 * half_w else max(bounds.left() + half_w, min(self.center.x(),
+                                                                                    bounds.right() - half_w))
+        y = 0.0 if bounds.height() <= 2 * half_h else max(bounds.top() + half_h, min(self.center.y(),
+                                                                                     bounds.bottom() - half_h))
+        self.center = QPointF(x, y)
+
+    def zoom_by(self, factor, anchor=None):
+        """Zoome en gardant fixe le point de l'image sous anchor (centre de la vue par défaut)."""
+        middle = QPointF(self.width() / 2, self.height() / 2)
+        anchor = anchor if anchor is not None else middle
+        point = self._to_photo(anchor)
+        self.zoom = max(1.0, min(20.0, self.zoom * factor))
+        self.center = point - (anchor - middle) / self._scale()
+        self._clamp_center()
+        self.update()
+
+    def fit_view(self):
+        self.zoom = 1.0
+        self.center = QPointF()
+        self.update()
+
+    # --- Rendu --------------------------------------------------------------
+
+    def render(self, width, height, adjusted=True, fast=False):
+        """Contenu du cadre en image de width × height pixels, sur fond blanc.
+
+        fast : d'après l'image d'affichage (aperçu) plutôt que d'après l'image complète.
+        """
+        source = self.display if fast else self.image
+        output = QImage(width, height, QImage.Format.Format_RGB32)
+        output.fill(Qt.GlobalColor.white)
+        scale = width / self.selection.width()
+        drawn_w, drawn_h = self.image.width() * scale, self.image.height() * scale
+        if drawn_w < source.width() * 0.9:  # une forte réduction par le peintre seul crénelerait les détails
+            source = source.scaled(max(1, round(drawn_w)), max(1, round(drawn_h)),
+                                   Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        painter = QPainter(output)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.scale(scale, scale)
+        painter.translate(-self.selection.topLeft())
+        painter.rotate(self.angle)
+        painter.drawImage(QRectF(-self.image.width() / 2, -self.image.height() / 2,
+                                 self.image.width(), self.image.height()), source)
+        painter.end()
+        if adjusted and not fast:
+            return adjust_image(output, self.brightness, self.contrast)
+        return output
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.fillRect(self.rect(), QColor("#1e293b"))
+
+        scale = self._scale()
+        painter.save()
+        painter.translate(self._to_view(QPointF()))
+        painter.scale(scale, scale)
+        painter.rotate(self.angle)
+        painter.drawImage(QRectF(-self.image.width() / 2, -self.image.height() / 2,
+                                 self.image.width(), self.image.height()), self.display)
+        painter.restore()
+
+        # Assombrit ce qui sera coupé.
+        frame = self._view_selection()
+        outside = QPainterPath()
+        outside.addRect(QRectF(self.rect()))
+        inside = QPainterPath()
+        inside.addRect(frame)
+        painter.fillPath(outside.subtracted(inside), QColor(15, 23, 42, 170))
+
+        color = QColor("#f59e0b") if self.free else QColor("#ffffff")
+        if not self.free and self.show_guide and self.head is not None:
+            # Ovale de la bonne hauteur (du menton au sommet du crâne) et axe du visage.
+            h = frame.height() * sum(self.head) / 2
+            w = h * 0.74
+            center = QPointF(frame.center().x(), frame.top() + frame.height() * 0.48)
+            painter.setPen(QPen(QColor(255, 255, 255, 200), 1.5, Qt.PenStyle.DashLine))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(center, w / 2, h / 2)
+            painter.setPen(QPen(QColor(255, 255, 255, 110), 1, Qt.PenStyle.DotLine))
+            painter.drawLine(QPointF(frame.center().x(), frame.top()), QPointF(frame.center().x(), frame.bottom()))
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(color, 2))
+        painter.drawRect(frame)
+        painter.setBrush(color)
+        painter.setPen(QPen(QColor("#1e293b"), 1))
+        points = [frame.topLeft(), frame.topRight(), frame.bottomLeft(), frame.bottomRight()]
+        if self.free:
+            points += [QPointF(frame.center().x(), frame.top()), QPointF(frame.center().x(), frame.bottom()),
+                       QPointF(frame.left(), frame.center().y()), QPointF(frame.right(), frame.center().y())]
+        for point in points:
+            painter.drawRect(QRectF(point.x() - 4.5, point.y() - 4.5, 9, 9))
+
+    # --- Souris et clavier ----------------------------------------------------
+
+    def _hit(self, position):
+        """Partie du cadre sous la souris : (sx, sy) pour un coin ou un bord, "move" à l'intérieur, None en dehors."""
+        frame = self._view_selection()
+        near_left = abs(position.x() - frame.left()) <= self.GRAB
+        near_right = abs(position.x() - frame.right()) <= self.GRAB
+        near_top = abs(position.y() - frame.top()) <= self.GRAB
+        near_bottom = abs(position.y() - frame.bottom()) <= self.GRAB
+        sx = 1 if near_right else -1 if near_left else 0
+        sy = 1 if near_bottom else -1 if near_top else 0
+        if sx and sy:
+            return sx, sy
+        if self.free:
+            if sx and frame.top() <= position.y() <= frame.bottom():
+                return sx, 0
+            if sy and frame.left() <= position.x() <= frame.right():
+                return 0, sy
+        return "move" if frame.contains(position) else None
+
+    def _update_cursor(self, position):
+        hit = self._hit(position)
+        if hit == "move":
+            shape = Qt.CursorShape.SizeAllCursor
+        elif hit is None:
+            shape = Qt.CursorShape.CrossCursor
+        elif hit[0] == 0:
+            shape = Qt.CursorShape.SizeVerCursor
+        elif hit[1] == 0:
+            shape = Qt.CursorShape.SizeHorCursor
+        elif hit[0] == hit[1]:
+            shape = Qt.CursorShape.SizeFDiagCursor
+        else:
+            shape = Qt.CursorShape.SizeBDiagCursor
+        self.setCursor(shape)
+
+    def mousePressEvent(self, event):
+        position = event.position()
+        if event.button() in (Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton):
+            self.drag = ("pan", position, QPointF(self.center))
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        elif event.button() == Qt.MouseButton.LeftButton:
+            hit = self._hit(position)
+            rect = self.selection
+            if hit == "move":
+                self.drag = ("move", self._to_photo(position) - rect.topLeft())
+            elif hit is None:  # nouvelle zone, seulement si la souris bouge vraiment
+                bounds = self.bounds()
+                point = self._to_photo(position)
+                anchor = QPointF(max(bounds.left(), min(point.x(), bounds.right())),
+                                 max(bounds.top(), min(point.y(), bounds.bottom())))
+                self.drag = ("draw", position, anchor)
+            else:
+                sx, sy = hit
+                anchor = QPointF(rect.left() if sx >= 0 else rect.right(), rect.top() if sy >= 0 else rect.bottom())
+                self.drag = ("resize", anchor, sx, sy)
+
+    def mouseMoveEvent(self, event):
+        position = event.position()
+        if self.drag is None:
+            self._update_cursor(position)
+            return
+        point = self._to_photo(position)
+        kind = self.drag[0]
+        if kind == "pan":
+            self.center = self.drag[2] - (position - self.drag[1]) / self._scale()
+            self._clamp_center()
+            self.update()
+        elif kind == "move":
+            rect = QRectF(self.selection)
+            rect.moveTopLeft(point - self.drag[1])
+            self._set_selection(rect)
+        elif kind == "resize":
+            self._resize_selection(self.drag[1], point, self.drag[2], self.drag[3])
+        elif (position - self.drag[1]).manhattanLength() >= 6:  # "draw"
+            anchor = self.drag[2]
+            sx = 1 if point.x() >= anchor.x() else -1
+            sy = 1 if point.y() >= anchor.y() else -1
+            self._resize_selection(anchor, point, sx, sy, new=True)
+
+    def _resize_selection(self, anchor, point, sx, sy, new=False):
+        """Étire le cadre depuis le point fixe anchor (coin ou bord opposé) ; sx, sy : sens de l'étirement."""
+        bounds = self.bounds()
+        minimum = max(24 / self._scale(), 2.0)
+        if self.free:
+            rect = QRectF(anchor, anchor) if new else QRectF(self.selection)
+            if sx > 0:
+                rect.setRight(max(min(point.x(), bounds.right()), anchor.x() + minimum))
+            elif sx < 0:
+                rect.setLeft(min(max(point.x(), bounds.left()), anchor.x() - minimum))
+            if sy > 0:
+                rect.setBottom(max(min(point.y(), bounds.bottom()), anchor.y() + minimum))
+            elif sy < 0:
+                rect.setTop(min(max(point.y(), bounds.top()), anchor.y() - minimum))
+            self._set_selection(rect)
+            return
+        room_w = bounds.right() - anchor.x() if sx > 0 else anchor.x() - bounds.left()
+        room_h = bounds.bottom() - anchor.y() if sy > 0 else anchor.y() - bounds.top()
+        limit = min(room_h, room_w / self.ratio)
+        wanted = max(abs(point.x() - anchor.x()) / self.ratio, abs(point.y() - anchor.y()))
+        h = max(min(wanted, limit), min(minimum, limit))
+        w = h * self.ratio
+        self.selection = QRectF(anchor.x() if sx > 0 else anchor.x() - w, anchor.y() if sy > 0 else anchor.y() - h,
+                                w, h)
+        self.update()
+        self.changed.emit()
+
+    def mouseReleaseEvent(self, event):
+        self.drag = None
+        self._update_cursor(event.position())
+
+    def wheelEvent(self, event):
+        steps = event.angleDelta().y() / 120
+        if steps:
+            self.zoom_by(1.15 ** steps, event.position())
+
+    def keyPressEvent(self, event):
+        """Les flèches déplacent le cadre d'un pixel de l'écran (dix avec Maj)."""
+        moves = {Qt.Key.Key_Left: (-1, 0), Qt.Key.Key_Right: (1, 0), Qt.Key.Key_Up: (0, -1), Qt.Key.Key_Down: (0, 1)}
+        if event.key() not in moves:
+            super().keyPressEvent(event)
+            return
+        step = (10 if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else 1) / self._scale()
+        dx, dy = moves[event.key()]
+        self._set_selection(self.selection.translated(dx * step, dy * step))
+
+    def resizeEvent(self, event):
+        self._clamp_center()
+        super().resizeEvent(event)
+
+
+class SheetPreview(QWidget):
+    """Aperçu de la feuille à imprimer, avec ses photos."""
+
+    def __init__(self):
+        super().__init__()
+        self.page = None
+        self.photo = None
+        self.positions = []
+        self.image = None
+        self.cut_lines = False
+        self.setMinimumSize(220, 200)
+
+    def set_sheet(self, page, photo, positions, cut_lines):
+        self.page, self.photo, self.positions, self.cut_lines = page, photo, positions, cut_lines
+        self.update()
+
+    def set_image(self, image):
+        self.image = image
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.fillRect(self.rect(), QColor("#e5e9f0"))
+        if self.page is None:
+            return
+        scale = min((self.width() - 20) / self.page[0], (self.height() - 20) / self.page[1])
+        w, h = self.page[0] * scale, self.page[1] * scale
+        left, top = (self.width() - w) / 2, (self.height() - h) / 2
+        painter.fillRect(QRectF(left + 2, top + 3, w, h), QColor(15, 23, 42, 40))
+        painter.fillRect(QRectF(left, top, w, h), QColor("#ffffff"))
+        for x, y in self.positions:
+            rect = QRectF(left + x * scale, top + y * scale, self.photo[0] * scale, self.photo[1] * scale)
+            if self.image is not None:
+                painter.drawImage(rect, self.image)
+            if self.cut_lines:
+                painter.setPen(QPen(QColor("#94a3b8"), 0))
+                painter.drawRect(rect)
+
+
+class IdPhotoDialog(QDialog):
+    """Prépare une photo d'identité : recadrage et retouches à gauche, format et feuille à droite.
+
+    settings : réglages d'une planche existante, à reprendre pour la modifier. limited : la photo reçue est déjà
+    recadrée, ce qui était hors du cadre n'existe plus.
+    """
+
+    def __init__(self, image, name, parent=None, settings=None, limited=False):
+        super().__init__(parent)
+        self.setWindowTitle(f"{'Modifier la planche' if settings is not None else 'Photos d’identité'} — {name}")
+        self.original = image
+        self.history = []
+        self.ops = []  # quarts de tour et découpes depuis la photo d'origine, gardés dans les réglages de la planche
+
+        self.view = PhotoCropView(image)
+        self.view.changed.connect(self._schedule_refresh)
+        self.refresh_timer = QTimer(self)  # un glissement de souris envoie beaucoup d'événements
+        self.refresh_timer.setSingleShot(True)
+        self.refresh_timer.setInterval(30)
+        self.refresh_timer.timeout.connect(self._refresh_photo)
+
+        layout = QHBoxLayout(self)
+        layout.setSpacing(14)
+        layout.addLayout(self._photo_column(), 1)
+        layout.addWidget(self._settings_column())
+
+        screen = self.screen().availableGeometry()
+        self.resize(min(1180, screen.width() - 40), min(800, screen.height() - 60))
+        self._update_sheet()
+        if settings is not None:
+            self.ok_button.setText("Mettre à jour la planche")
+            self.limited_label.setVisible(limited)
+            self.apply_settings(settings)
+
+    # --- Construction de la fenêtre ---------------------------------------------
+
+    @staticmethod
+    def _tool_button(text, icon, tooltip, slot):
+        button = QPushButton(make_icon(icon), text) if icon else QPushButton(text)
+        button.setIconSize(QSize(18, 18))
+        button.setToolTip(tooltip)
+        button.setAutoDefault(False)  # Entrée dans un champ ne doit pas déclencher un bouton
+        button.clicked.connect(slot)
+        return button
+
+    def _photo_column(self):
+        self.tools = QWidget()
+        tools = QHBoxLayout(self.tools)
+        tools.setContentsMargins(0, 0, 0, 0)
+        tools.setSpacing(6)
+        tools.addWidget(self._tool_button("", "rotate_ccw", "Pivoter d'un quart de tour à gauche",
+                                          lambda: self.rotate(270)))
+        tools.addWidget(self._tool_button("", "rotate_cw", "Pivoter d'un quart de tour à droite",
+                                          lambda: self.rotate(90)))
+        tools.addSpacing(8)
+        tools.addWidget(self._tool_button("", "zoom_out", "Zoom arrière (molette)", lambda: self.view.zoom_by(0.8)))
+        tools.addWidget(self._tool_button("", "zoom_in", "Zoom avant (molette)", lambda: self.view.zoom_by(1.25)))
+        tools.addWidget(self._tool_button("Ajuster", None, "Afficher toute la photo", self.view.fit_view))
+        tools.addSpacing(8)
+        tools.addWidget(self._tool_button("Tronquer…", "crop", "Couper définitivement les bords de la photo, "
+                                          "aux proportions de votre choix", self.start_truncate))
+        tools.addStretch()
+        self.undo_button = self._tool_button("Annuler", "undo", "Annuler le dernier quart de tour ou la dernière "
+                                             "découpe", self.undo)
+        self.undo_button.setEnabled(False)
+        tools.addWidget(self.undo_button)
+        tools.addWidget(self._tool_button("Réinitialiser", "reset", "Revenir à la photo d'origine", self.reset))
+
+        # Boutons du mode « tronquer », à la place des outils.
+        self.truncate_bar = QWidget()
+        bar = QHBoxLayout(self.truncate_bar)
+        bar.setContentsMargins(0, 0, 0, 0)
+        bar.setSpacing(6)
+        hint = QLabel("Délimitez la partie à garder, puis appliquez (Entrée). Échap pour annuler.")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        bar.addWidget(hint, 1)
+        bar.addWidget(self._tool_button("Annuler", None, "Garder la photo telle quelle", self.cancel_truncate))
+        apply_button = self._tool_button("Appliquer la découpe", "crop", "Couper tout ce qui est hors du cadre",
+                                         self.apply_truncate)
+        set_primary(apply_button)
+        bar.addWidget(apply_button)
+        self.truncate_bar.hide()
+
+        self.angle_slider, self.angle_label = self._slider(-ID_PHOTO_MAX_ANGLE * 10, ID_PHOTO_MAX_ANGLE * 10)
+        self.brightness_slider, self.brightness_label = self._slider(-50, 50)
+        self.contrast_slider, self.contrast_label = self._slider(-50, 50)
+        self.angle_slider.setToolTip("Corrige une photo légèrement penchée")
+        self.brightness_slider.setToolTip("Reste discret : une photo d'identité ne doit pas être retouchée")
+        self.contrast_slider.setToolTip("Reste discret : une photo d'identité ne doit pas être retouchée")
+        self.angle_slider.valueChanged.connect(self._angle_changed)
+        self.brightness_slider.valueChanged.connect(self._adjustments_changed)
+        self.contrast_slider.valueChanged.connect(self._adjustments_changed)
+
+        sliders = QGridLayout()
+        sliders.setHorizontalSpacing(8)
+        sliders.setVerticalSpacing(2)
+        for column, (title, slider, label) in enumerate((
+                ("Redresser", self.angle_slider, self.angle_label),
+                ("Luminosité", self.brightness_slider, self.brightness_label),
+                ("Contraste", self.contrast_slider, self.contrast_label))):
+            sliders.addWidget(QLabel(title), 0, column * 2)
+            label.setAlignment(Qt.AlignmentFlag.AlignRight)
+            label.setObjectName("hint")
+            sliders.addWidget(label, 0, column * 2 + 1)
+            sliders.addWidget(slider, 1, column * 2, 1, 2)
+        self.angle_label.setText("0°")
+
+        hint = QLabel("Déplacez le cadre et tirez ses coins, ou tracez une nouvelle zone. Molette : zoom. "
+                      "Clic droit : déplacer la vue. Flèches : réglage fin.")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+
+        self.limited_label = QLabel("Cette planche ne contient que la photo déjà recadrée : vous pouvez la recadrer "
+                                    "davantage, mais pas retrouver ce qui était hors du cadre. Repartez de la photo "
+                                    "d'origine pour cela (bouton « Identité »).")
+        self.limited_label.setWordWrap(True)
+        self.limited_label.setStyleSheet("color: #b45309;")
+        self.limited_label.hide()
+
+        column = QVBoxLayout()
+        column.setSpacing(8)
+        column.addWidget(self.tools)
+        column.addWidget(self.truncate_bar)
+        column.addWidget(self.limited_label)
+        column.addWidget(self.view, 1)
+        column.addWidget(hint)
+        column.addLayout(sliders)
+        return column
+
+    @staticmethod
+    def _slider(minimum, maximum):
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(minimum, maximum)
+        slider.setValue(0)
+        return slider, QLabel("0")
+
+    @staticmethod
+    def _spin(value, minimum, maximum, slot):
+        spin = QDoubleSpinBox()
+        spin.setRange(minimum, maximum)
+        spin.setDecimals(1)
+        spin.setSingleStep(1)
+        spin.setSuffix(" mm")
+        spin.setValue(value)
+        spin.valueChanged.connect(slot)
+        return spin
+
+    def _settings_column(self):
+        self.format_combo = QComboBox()
+        for label, *_size in ID_PHOTO_FORMATS:
+            self.format_combo.addItem(label)
+        self.format_combo.currentIndexChanged.connect(self._update_sheet)
+        self.photo_w = self._spin(35, 10, 200, self._update_sheet)
+        self.photo_h = self._spin(45, 10, 200, self._update_sheet)
+        self.guide_box = QCheckBox("Afficher l'ovale du visage")
+        self.guide_box.setChecked(True)
+        self.guide_box.setToolTip("Le haut du crâne et le menton doivent toucher l'ovale")
+        self.guide_box.toggled.connect(self._update_sheet)
+
+        self.paper_combo = QComboBox()
+        for label, *_size in ID_PHOTO_PAPERS:
+            self.paper_combo.addItem(label)
+        self.paper_combo.currentIndexChanged.connect(self._update_sheet)
+        self.paper_w = self._spin(100, 40, 500, self._update_sheet)
+        self.paper_h = self._spin(150, 40, 500, self._update_sheet)
+
+        self.orientation_combo = QComboBox()
+        self.orientation_combo.addItem("Automatique", "auto")
+        self.orientation_combo.addItem("Portrait", "portrait")
+        self.orientation_combo.addItem("Paysage", "landscape")
+        self.orientation_combo.currentIndexChanged.connect(self._update_sheet)
+        self.margin_spin = self._spin(5, ID_PHOTO_MIN_MARGIN, 50, self._update_sheet)
+        self.margin_spin.setToolTip("Blanc autour des photos. Leur taille ne change pas, seulement leur nombre. "
+                                    f"Minimum {ID_PHOTO_MIN_MARGIN} mm : plus près du bord, l'imprimante les couperait")
+        self.gap_spin = self._spin(2, 0, 30, self._update_sheet)
+        self.gap_spin.setToolTip("Blanc entre les photos. Leur taille ne change pas, seulement leur nombre")
+        self.wanted_count = 0  # nombre demandé, rétabli quand la feuille peut de nouveau le contenir
+        self.count_spin = QSpinBox()
+        self.count_spin.setRange(0, 1)
+        self.count_spin.setSpecialValueText("Feuille entière")
+        self.count_spin.valueChanged.connect(self._count_changed)
+        self.cut_box = QCheckBox("Traits de coupe autour des photos")
+        self.cut_box.setChecked(True)
+        self.cut_box.toggled.connect(self._update_sheet)
+        self.keep_box = QCheckBox("Garder la photo pour modifier la planche plus tard")
+        self.keep_box.setChecked(True)
+        self.keep_box.setToolTip("La photo entière, y compris ce qui est hors du cadre, est jointe au PDF (quelques Mo, "
+                                 "sans ses métadonnées). Décochez si vous transmettez ce PDF à quelqu'un d'autre")
+
+        self.custom_photo_rows = []
+        self.custom_paper_rows = []
+        grid = QGridLayout()
+        grid.setVerticalSpacing(6)
+        grid.setColumnStretch(1, 1)
+        row = 0
+
+        def add(label, widget, rows=None):
+            nonlocal row
+            caption = QLabel(label)
+            grid.addWidget(caption, row, 0)
+            grid.addWidget(widget, row, 1)
+            if rows is not None:
+                rows.extend((caption, widget))
+            row += 1
+
+        def heading(text):
+            nonlocal row
+            title = QLabel(text)
+            title.setStyleSheet("font-weight: 600;")
+            grid.addWidget(title, row, 0, 1, 2)
+            row += 1
+
+        heading("Format de la photo")
+        grid.addWidget(self.format_combo, row, 0, 1, 2)
+        row += 1
+        add("Largeur", self.photo_w, self.custom_photo_rows)
+        add("Hauteur", self.photo_h, self.custom_photo_rows)
+        grid.addWidget(self.guide_box, row, 0, 1, 2)
+        row += 1
+        heading("Papier de l'imprimante")
+        grid.addWidget(self.paper_combo, row, 0, 1, 2)
+        row += 1
+        add("Largeur", self.paper_w, self.custom_paper_rows)
+        add("Hauteur", self.paper_h, self.custom_paper_rows)
+        add("Orientation", self.orientation_combo)
+        add("Marge", self.margin_spin)
+        add("Espacement", self.gap_spin)
+        add("Nombre", self.count_spin)
+        grid.addWidget(self.cut_box, row, 0, 1, 2)
+        grid.addWidget(self.keep_box, row + 1, 0, 1, 2)
+
+        self.sheet_preview = SheetPreview()
+        self.summary = QLabel()
+        self.summary.setWordWrap(True)
+        self.summary.setStyleSheet("font-weight: 600;")
+        self.warning = QLabel()
+        self.warning.setWordWrap(True)
+        self.warning.setStyleSheet(f"color: {RED};")
+        self.warning.hide()
+        note = QLabel("La marge et l'espacement ne changent que le nombre de photos, jamais leur taille. Imprimez sur le "
+                      "papier choisi ici, vérifiez à la règle une photo, et les exigences de l'organisme qui la demande.")
+        note.setObjectName("hint")
+        note.setWordWrap(True)
+
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.ok_button = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self.ok_button.setText("Générer le PDF")
+        self.ok_button.setIcon(make_icon("id_photo"))
+        set_primary(self.ok_button)
+        cancel = self.buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        cancel.setText("Annuler")
+        for button in (self.ok_button, cancel):  # aucun bouton par défaut : Entrée sert à valider les champs
+            button.setAutoDefault(False)
+            button.setDefault(False)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+
+        panel = QVBoxLayout()
+        panel.setContentsMargins(0, 0, 0, 0)
+        panel.setSpacing(8)
+        panel.addLayout(grid)
+        panel.addWidget(self.sheet_preview, 1)
+        panel.addWidget(self.summary)
+        panel.addWidget(self.warning)
+        panel.addWidget(note)
+        panel.addWidget(self.buttons)
+        widget = QWidget()
+        widget.setFixedWidth(340)
+        widget.setLayout(panel)
+        return widget
+
+    # --- Réglages de la feuille ---------------------------------------------------
+
+    def photo_size(self):
+        """(largeur, hauteur) de la photo en mm."""
+        _label, w, h, _head_min, _head_max = ID_PHOTO_FORMATS[self.format_combo.currentIndex()]
+        return (self.photo_w.value(), self.photo_h.value()) if w is None else (w, h)
+
+    def paper_size(self):
+        """(largeur, hauteur) de la feuille en mm."""
+        _label, w, h = ID_PHOTO_PAPERS[self.paper_combo.currentIndex()]
+        return (self.paper_w.value(), self.paper_h.value()) if w is None else (w, h)
+
+    def _layout(self):
+        return id_photo_layout(self.paper_size(), self.photo_size(), self.margin_spin.value(), self.gap_spin.value(),
+                               self.orientation_combo.currentData(), self.count_spin.value())
+
+    def _count_changed(self, value):
+        self.wanted_count = value
+        self._update_sheet()
+
+    def _update_sheet(self):
+        """Applique le format et la feuille choisis au cadre, à l'aperçu et au résumé."""
+        _label, custom, _h, head_min, head_max = ID_PHOTO_FORMATS[self.format_combo.currentIndex()]
+        for widget in self.custom_photo_rows:
+            widget.setVisible(custom is None)
+        for widget in self.custom_paper_rows:
+            widget.setVisible(ID_PHOTO_PAPERS[self.paper_combo.currentIndex()][1] is None)
+
+        photo = self.photo_size()
+        head = None if custom is None else (head_min / photo[1], head_max / photo[1])
+        self.guide_box.setVisible(head is not None)  # format sur mesure : hauteur de tête inconnue
+        self.view.set_guide(head, self.guide_box.isChecked())
+        self.view.set_ratio(photo[0] / photo[1])
+
+        page_w, page_h, capacity, positions = self._layout()
+        # Moins de place : moins de photos que demandé, jamais des photos plus petites.
+        self.count_spin.blockSignals(True)
+        self.count_spin.setMaximum(max(capacity, 1))
+        self.count_spin.setValue(self.wanted_count)
+        self.count_spin.blockSignals(False)
+        page_w, page_h, capacity, positions = self._layout()
+        self.positions = positions
+        self.page_size = (page_w, page_h)
+        self.sheet_preview.set_sheet((page_w, page_h), photo, positions, self.cut_box.isChecked())
+        if positions:
+            self.summary.setText(f"{len(positions)} photo{'s' if len(positions) > 1 else ''} de {mm_text(photo[0])} × "
+                                 f"{mm_text(photo[1])} mm sur une feuille de {mm_text(round(page_w, 1))} × "
+                                 f"{mm_text(round(page_h, 1))} mm")
+        else:
+            self.summary.setText("La photo ne tient pas sur cette feuille : réduisez la marge ou changez de papier.")
+        self._refresh_photo()
+
+    # --- Photo ---------------------------------------------------------------------
+
+    def _schedule_refresh(self):
+        self.refresh_timer.start()
+
+    def output_dpi(self):
+        """Résolution réelle de la zone sélectionnée une fois imprimée, en pixels par pouce."""
+        return self.view.selection.width() / (self.photo_size()[0] / 25.4)
+
+    def _refresh_photo(self):
+        """Met à jour la vignette, les avertissements et l'état du bouton de génération."""
+        self.refresh_timer.stop()
+        if self.view.free:
+            self.ok_button.setEnabled(False)
+            return
+        photo = self.photo_size()
+        self.sheet_preview.set_image(self.view.render(240, max(1, round(240 * photo[1] / photo[0])), fast=True))
+        messages = []
+        dpi = self.output_dpi()
+        if dpi < ID_PHOTO_LOW_DPI:
+            messages.append(f"Zone peu détaillée ({round(dpi)} ppp) : la photo risque d'être floue une fois imprimée. "
+                            "Il en faudrait au moins 300.")
+        if not self.view.covers_image():
+            messages.append("Le cadre dépasse de la photo : les parties vides seront imprimées en blanc.")
+        self.warning.setText("\n".join(messages))
+        self.warning.setVisible(bool(messages))
+        self.ok_button.setEnabled(bool(self.positions))
+
+    def _remember(self):
+        self.history.append(self.view.state())
+        del self.history[:-ID_PHOTO_HISTORY]
+        self.undo_button.setEnabled(True)
+
+    def _set_angle_slider(self, angle):
+        self.angle_slider.blockSignals(True)
+        self.angle_slider.setValue(round(angle * 10))
+        self.angle_slider.blockSignals(False)
+        self.angle_label.setText(f"{mm_text(angle)}°")
+
+    def _angle_changed(self, value):
+        angle = value / 10
+        self.angle_label.setText(f"{mm_text(angle)}°")
+        self.view.set_angle(angle)
+
+    def _adjustments_changed(self):
+        brightness, contrast = self.brightness_slider.value(), self.contrast_slider.value()
+        self.brightness_label.setText(str(brightness))
+        self.contrast_label.setText(str(contrast))
+        self.view.set_adjustments(brightness, contrast)
+
+    def rotate(self, degrees):
+        """Quart de tour : l'inclinaison fine est conservée, le cadre repart de la zone par défaut."""
+        self._remember()
+        self.ops.append(("rotate", degrees))
+        self.view.set_state(self.view.image.transformed(QTransform().rotate(degrees)), self.view.angle, None)
+
+    def undo(self):
+        if not self.history:
+            return
+        image, angle, selection = self.history.pop()
+        self.ops.pop()
+        self.view.set_state(image, angle, selection)
+        self._set_angle_slider(angle)
+        self.undo_button.setEnabled(bool(self.history))
+
+    def reset(self):
+        self.history.clear()
+        self.ops.clear()
+        self.undo_button.setEnabled(False)
+        self._set_angle_slider(0)
+        for slider in (self.brightness_slider, self.contrast_slider):
+            slider.blockSignals(True)
+            slider.setValue(0)
+            slider.blockSignals(False)
+        self.brightness_label.setText("0")
+        self.contrast_label.setText("0")
+        self.view.brightness = self.view.contrast = 0
+        self.view.set_state(self.original, 0.0, None)
+
+    # --- Mode « tronquer » ------------------------------------------------------------
+
+    def _set_truncating(self, active):
+        self.tools.setVisible(not active)
+        self.truncate_bar.setVisible(active)
+
+    def start_truncate(self):
+        self.view.begin_free()
+        self._set_truncating(True)
+        self.view.setFocus()
+
+    def apply_truncate(self):
+        self._remember()
+        # Le souvenir garde le cadre d'avant le mode « tronquer » : c'est lui qui revient à l'annulation.
+        image, angle, selection = self.history[-1]
+        self.history[-1] = (image, angle, QRectF(self.view.saved_selection))
+        self.ops.append(("crop", angle, selection.x(), selection.y(), selection.width(), selection.height()))
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            self.view.end_free(True)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._set_angle_slider(0)
+        self._set_truncating(False)
+
+    def cancel_truncate(self):
+        self.view.end_free(False)
+        self._set_truncating(False)
+
+    def keyPressEvent(self, event):
+        """Entrée applique la découpe ou active le bouton sélectionné, mais ne génère jamais le PDF depuis un champ
+        (la barre de boutons se redonne un bouton par défaut à l'affichage)."""
+        if event.key() not in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            super().keyPressEvent(event)
+        elif self.view.free:
+            self.apply_truncate()
+        elif isinstance(self.focusWidget(), QPushButton):
+            self.focusWidget().click()
+
+    def reject(self):
+        """Échap quitte d'abord le mode « tronquer »."""
+        if self.view.free:
+            self.cancel_truncate()
+        else:
+            super().reject()
+
+    # --- Réglages d'une planche ----------------------------------------------------------
+
+    def settings(self):
+        """Tout ce qu'il faut, avec la photo d'origine, pour reprendre cette planche plus tard."""
+        rect = self.view.selection
+        return {
+            "version": 1,
+            "format": self.format_combo.currentText(),
+            "photo": self.photo_size(),
+            "paper_name": self.paper_combo.currentText(),
+            "paper": self.paper_size(),
+            "orientation": self.orientation_combo.currentData(),
+            "margin": self.margin_spin.value(),
+            "gap": self.gap_spin.value(),
+            "count": self.wanted_count,
+            "cut_lines": self.cut_box.isChecked(),
+            "guide": self.guide_box.isChecked(),
+            "ops": list(self.ops),
+            "angle": self.view.angle,
+            "selection": (rect.x(), rect.y(), rect.width(), rect.height()),
+            "brightness": self.brightness_slider.value(),
+            "contrast": self.contrast_slider.value(),
+        }
+
+    @staticmethod
+    def _choose_size(combo, table, name, size, spin_w, spin_h):
+        """Sélectionne la ligne du tableau de ce nom et de cette taille, sinon de cette taille, sinon « Personnalisé »."""
+        def same(row):
+            return row[1] is not None and abs(row[1] - size[0]) < 0.06 and abs(row[2] - size[1]) < 0.06
+
+        rows = list(enumerate(table))
+        match = next((i for i, row in rows if row[0] == name and same(row)), None)
+        if match is None:
+            match = next((i for i, row in rows if same(row)), None)
+        if match is None:
+            spin_w.setValue(size[0])
+            spin_h.setValue(size[1])
+            match = next(i for i, row in rows if row[1] is None)
+        combo.setCurrentIndex(match)
+
+    def apply_settings(self, settings):
+        """Reprend les réglages d'une planche. Ils viennent d'un fichier : toute valeur invalide est ignorée."""
+        photo = finite_numbers(settings.get("photo"), 2)
+        if photo is not None:
+            self._choose_size(self.format_combo, ID_PHOTO_FORMATS, settings.get("format"), photo,
+                              self.photo_w, self.photo_h)
+        paper = finite_numbers(settings.get("paper"), 2)
+        if paper is not None:
+            self._choose_size(self.paper_combo, ID_PHOTO_PAPERS, settings.get("paper_name"), paper,
+                              self.paper_w, self.paper_h)
+        index = self.orientation_combo.findData(settings.get("orientation"))
+        if index >= 0:
+            self.orientation_combo.setCurrentIndex(index)
+        for key, spin in (("margin", self.margin_spin), ("gap", self.gap_spin)):
+            value = finite_numbers((settings.get(key),), 1)
+            if value is not None:
+                spin.setValue(value[0])
+        self.cut_box.setChecked(settings.get("cut_lines", True) is not False)
+        self.guide_box.setChecked(settings.get("guide", True) is not False)
+        count = finite_numbers((settings.get("count"),), 1)
+        if count is not None:
+            self.wanted_count = max(0, int(min(count[0], 10000)))
+
+        ops = settings.get("ops")
+        for op in ops[:ID_PHOTO_MAX_OPS] if isinstance(ops, (list, tuple)) else ():
+            if not isinstance(op, (list, tuple)) or not op:
+                continue
+            if op[0] == "rotate" and len(op) == 2 and op[1] in (90, 270):
+                self.rotate(op[1])
+            elif op[0] == "crop":
+                crop = finite_numbers(op[1:], 5)
+                if crop is not None and crop[3] >= 1 and crop[4] >= 1 and abs(crop[0]) <= ID_PHOTO_MAX_ANGLE:
+                    self._set_angle_slider(crop[0])
+                    self.view.set_angle(crop[0])
+                    self.start_truncate()
+                    self.view._set_selection(QRectF(*crop[1:]))
+                    self.apply_truncate()
+
+        angle = finite_numbers((settings.get("angle"),), 1)
+        if angle is not None and abs(angle[0]) <= ID_PHOTO_MAX_ANGLE:
+            self._set_angle_slider(angle[0])
+            self.view.set_angle(angle[0])
+        self._update_sheet()
+        selection = finite_numbers(settings.get("selection"), 4)
+        if selection is not None and selection[2] >= 1 and selection[3] >= 1:
+            self.view._set_selection(QRectF(*selection))
+        for key, slider in (("brightness", self.brightness_slider), ("contrast", self.contrast_slider)):
+            value = finite_numbers((settings.get(key),), 1)
+            if value is not None:
+                slider.setValue(round(max(slider.minimum(), min(value[0], slider.maximum()))))
+        self._refresh_photo()
+
+    # --- Résultat ---------------------------------------------------------------------
+
+    def sheet(self):
+        """Le PDF de la feuille de photos, à la résolution que permet la zone sélectionnée."""
+        photo = self.photo_size()
+        dpi = max(ID_PHOTO_MIN_DPI, min(self.output_dpi(), ID_PHOTO_MAX_DPI))
+        width = max(1, round(photo[0] / 25.4 * dpi))
+        height = max(1, round(photo[1] / 25.4 * dpi))
+        source = None
+        if self.keep_box.isChecked():
+            source = jpeg_bytes(self.original, ID_PHOTO_SOURCE_QUALITY), repr(self.settings())
+        return id_photo_pdf(self.view.render(width, height), self.page_size, photo, self.positions,
+                            self.cut_box.isChecked(), source)
+
+
+# --- Comparaison de deux PDF ---------------------------------------------------------
+
+# Types de différences : (couleur, libellé, libellé au pluriel en minuscules)
+COMPARE_KINDS = {
+    "ajout": (GREEN, "Ajout", "ajouts"),
+    "suppression": (RED, "Suppression", "suppressions"),
+    "modification": ("#ea7a00", "Modification", "modifications"),
+    "visuel": ("#7c3aed", "Changement visuel", "changements visuels"),
+    "page_ajoutee": (GREEN, "Page ajoutée", "pages ajoutées"),
+    "page_supprimee": (RED, "Page supprimée", "pages supprimées"),
+    "mise_en_page": ("#0891b2", "Mise en page", "changements de mise en page"),
+}
+COMPARE_TEXT_KINDS = ("ajout", "suppression", "modification")
+COMPARE_PAGE_KINDS = ("page_ajoutee", "page_supprimee", "mise_en_page")
+COMPARE_MODES = [("both", "Texte et visuel"), ("text", "Texte seul"), ("visual", "Visuel seul")]
+COMPARE_DPI = 72  # résolution du rendu comparé pixel par pixel
+COMPARE_CELL = 4  # pixels : grain des zones de différence visuelle (4 px à 72 ppp ≈ 1,4 mm)
+COMPARE_GAP = 2  # cellules : deux différences plus proches que cela forment une seule zone
+COMPARE_GAP_FINE = 1  # réglage « plan technique » : seules les cellules qui se touchent forment une zone (un via et
+# la piste voisine restent deux différences)
+COMPARE_DPI_FINE = 144  # réglage « plan technique » : cellules de 0,7 mm au lieu de 1,4 mm
+COMPARE_MAX_ZONES_FINE = 150
+COMPARE_PRESETS = [("document", "Document", 10), ("plan", "Plan technique (circuit, dessin)", 5)]
+COMPARE_REPORT_DETAILS = 150  # différences au plus montrées en gros plan dans le rapport
+# Nom d'une couche de circuit imprimé (KiCad, Altium, Eagle, Gerber) ou d'un plan de perçage, lu dans le texte de la page.
+LAYER_NAME = re.compile(
+    r"(?<![\w.])(?:[FB][._](?:Cu|SilkS|Silkscreen|Mask|Paste|Fab|CrtYd|Courtyard|Adhes|Adhesive)|In\d{1,2}[._]Cu"
+    r"|Edge[._]Cuts|User[._]\w+|Dwgs[._]User|Cmts[._]User|Margin"
+    r"|(?:Top|Bottom) (?:Layer|Overlay|Solder|Paste|Silkscreen|Copper)|Mid-?Layer ?\d+|Inner ?Layer ?\d+"
+    r"|Drill (?:Drawing|Guide|Map)|Plan de perçage|Perçages)(?![\w])", re.IGNORECASE)
+COMPARE_LINE_JOIN = 3  # lignes identiques au plus entre deux blocs modifiés comparés ensemble, mot à mot
+COMPARE_MAX_ZONES = 25  # au-delà, les zones d'une page sont réunies en une seule
+COMPARE_TEXT_SIMILARITY = 0.25  # part des mots retrouvés à l'identique pour apparier deux pages
+COMPARE_IMAGE_SIMILARITY = 0.6  # ressemblance des vignettes pour apparier deux pages sans texte
+COMPARE_PAGE_BAND = 30  # écart (en pages) cherché autour de la diagonale pour apparier les pages
+COMPARE_THUMB = (24, 34)  # vignette en niveaux de gris des pages sans texte
+COMPARE_NEW_PAGE_SHARE = 0.9  # part de mots nouveaux au-delà de laquelle une page sans équivalent est « ajoutée »
+COMPARE_TICK = 0.04  # secondes de calcul entre deux passages dans la boucle d'événements
+COMPARE_EXCERPT = 80  # caractères au plus pour citer un texte
+COMPARE_HEADER = 26  # pixels : bandeau au-dessus de chaque page dans la vue comparée
+PUNCTUATION = re.compile(r"[\W_]+")
+
+
+def word_key(text, ignore_case, ignore_punctuation):
+    """Forme d'un mot utilisée pour la comparaison (vide : mot ignoré)."""
+    if ignore_punctuation:
+        text = PUNCTUATION.sub("", text)
+    else:
+        text = "".join(text.split())  # espaces insécables ou fines restées dans un mot
+    return text.casefold() if ignore_case else text
+
+
+def page_words(page, ignore_case=False, ignore_punctuation=False):
+    """Mots de la page dans l'ordre du contenu du fichier : (rectangle affiché, texte, clé de comparaison, ligne).
+
+    Cet ordre est le plus stable d'une version à l'autre (un tri par position mélangerait les colonnes) ; un texte
+    réécrit ailleurs dans le contenu est rapproché ensuite par sa position (reconcile_rewritten). MuPDF donne les
+    coordonnées de la page non pivotée : elles sont ramenées à la page affichée."""
+    matrix = page.rotation_matrix
+    words = []
+    extracted = page.get_text("words", flags=pymupdf.TEXT_MEDIABOX_CLIP)
+    for x0, y0, x1, y1, text, block, line, _ in extracted:
+        key = word_key(text, ignore_case, ignore_punctuation)
+        if key:
+            words.append((pymupdf.Rect(x0, y0, x1, y1) * matrix, text, key, (block, line)))
+    return words
+
+
+def unmoved_words(words, others, tolerance=0.5):
+    """Les mots de words présents tels quels au même endroit dans others (à tolerance points près) : ils n'ont ni
+    changé ni bougé, et visual_differences les compare donc à l'image."""
+    places = {}
+    for rect, text, *_ in others:
+        places.setdefault(text, []).append(rect)
+    return [word for word in words if any(
+        abs(word[0].x0 - r.x0) <= tolerance and abs(word[0].y0 - r.y0) <= tolerance
+        and abs(word[0].x1 - r.x1) <= tolerance and abs(word[0].y1 - r.y1) <= tolerance
+        for r in places.get(word[1], ()))]
+
+
+def page_name(page, words=None):
+    """Nom d'une page pour la comparaison : son étiquette dans le PDF si elle n'est pas un simple numéro, sinon le
+    nom de couche de circuit imprimé trouvé dans son texte (« F.Cu », « Top Layer », « Perçages »…), sinon ""."""
+    try:
+        label = page.get_label().strip()
+    except Exception:
+        label = ""
+    if label and not label.isdigit():
+        return label[:40]
+    text = " ".join(w[1] for w in words) if words is not None else page.get_text()
+    found = LAYER_NAME.search(text)
+    return found.group(0) if found else ""
+
+
+def overlay_pixmap(page_a, page_b, matrix, clip=None):
+    """Superposition des deux pages en une image RVB : ce qui n'est que dans A en rouge, que dans B en vert, ce qui est
+    commun en noir (chaque page est rendue en niveaux de gris : la couleur d'origine ne compte pas)."""
+    pix_a = page_a.get_pixmap(matrix=matrix, colorspace=pymupdf.csGRAY, alpha=False, clip=clip)
+    pix_b = page_b.get_pixmap(matrix=matrix, colorspace=pymupdf.csGRAY, alpha=False, clip=clip)
+    if pix_b.irect != pix_a.irect:  # pages de formats différents : B est ramenée au cadre de A, fond blanc
+        fond = pymupdf.Pixmap(pymupdf.csGRAY, pix_a.irect, False)
+        fond.clear_with(255)
+        commun = pix_a.irect & pix_b.irect
+        if not commun.is_empty:
+            fond.copy(pix_b, commun)
+        pix_b = fond
+    gray_a, gray_b = pix_a.samples, pix_b.samples
+    rgb = bytearray(3 * len(gray_a))
+    rgb[0::3] = gray_b  # rouge : clair là où B est blanc (le noir de A seul devient rouge)
+    rgb[1::3] = gray_a  # vert : clair là où A est blanc (le noir de B seul devient vert)
+    rgb[2::3] = bytes(map(min, gray_a, gray_b))
+    return pymupdf.Pixmap(pymupdf.csRGB, pix_a.width, pix_a.height, bytes(rgb), False)
+
+
+def page_thumbnail(page):
+    """Vignette en niveaux de gris de taille fixe, pour apparier des pages sans texte."""
+    width, height = COMPARE_THUMB
+    rect = page.rect
+    pix = page.get_pixmap(matrix=pymupdf.Matrix(width / max(1, rect.width), height / max(1, rect.height)),
+                          colorspace=pymupdf.csGRAY, alpha=False)
+    data, out = pix.samples, bytearray(b"\xff" * (width * height))
+    w = min(width, pix.width)
+    for y in range(min(height, pix.height)):
+        out[y * width:y * width + w] = data[y * pix.stride:y * pix.stride + w]
+    return bytes(out)
+
+
+def thumbnail_similarity(a, b):
+    """Ressemblance de deux vignettes, de 0 à 1, rapportée à l'encre présente (une page presque blanche ne
+    ressemble pas à toutes les autres)."""
+    ink = (255 * len(a) - sum(a)) + (255 * len(b) - sum(b))
+    if ink == 0:
+        return 1.0
+    return max(0.0, 1 - sum(abs(x - y) for x, y in zip(a, b)) / ink)
+
+
+def align_pages(n, m, similarity):
+    """Apparie les pages des deux versions, à la manière d'un diff : une page insérée ou supprimée ne décale pas
+    les suivantes. Générateur (une ligne du tableau par étape) qui renvoie la liste ordonnée des couples
+    (i, j), i ou j valant None pour une page sans équivalent.
+
+    Les pages restées seules entre deux couples sont ensuite associées dans l'ordre (page modifiée en profondeur
+    plutôt que supprimée puis ajoutée) ; le surplus seul est déclaré ajouté ou supprimé."""
+    band = COMPARE_PAGE_BAND + abs(n - m)
+    previous = [0.0] * (m + 1)
+    moves = []  # 0 : couple, 1 : page de A seule, 2 : page de B seule
+    for i in range(1, n + 1):
+        center = (i - 1) * m / max(1, n)
+        low, high = max(1, int(center - band)), min(m, int(center + band) + 1)
+        row, move = [0.0] * (m + 1), bytearray(m + 1)
+        for j in range(1, m + 1):
+            best, choice = previous[j], 1
+            if row[j - 1] > best:
+                best, choice = row[j - 1], 2
+            if low <= j <= high:
+                score, threshold = similarity(i - 1, j - 1)
+                if score >= threshold and previous[j - 1] + score >= best:
+                    best, choice = previous[j - 1] + score, 0
+            row[j], move[j] = best, choice
+        moves.append(move)
+        previous = row
+        yield i / max(1, n)
+
+    path, i, j = [], n, m
+    while i > 0 or j > 0:
+        choice = moves[i - 1][j] if i > 0 and j > 0 else (1 if i > 0 else 2)
+        if choice == 0:
+            path.append((i - 1, j - 1))
+            i, j = i - 1, j - 1
+        elif choice == 1:
+            path.append((i - 1, None))
+            i -= 1
+        else:
+            path.append((None, j - 1))
+            j -= 1
+    path.reverse()
+
+    pairs, lone_a, lone_b = [], [], []
+
+    def flush():
+        for a, b in zip(lone_a, lone_b):
+            pairs.append((a, b))
+        pairs.extend((a, None) for a in lone_a[len(lone_b):])
+        pairs.extend((None, b) for b in lone_b[len(lone_a):])
+        lone_a.clear()
+        lone_b.clear()
+
+    for a, b in path:
+        if a is None:
+            lone_b.append(b)
+        elif b is None:
+            lone_a.append(a)
+        else:
+            flush()
+            pairs.append((a, b))
+    flush()
+    return pairs
+
+
+def merge_word_rects(words):
+    """Rectangles (page, Rect) de mots consécutifs, réunis ligne par ligne."""
+    marks = []
+    last = None
+    for page, rect, _text, _key, line in words:
+        if last is not None and last == (page, line):
+            marks[-1] = (page, marks[-1][1] | rect)
+        else:
+            marks.append((page, pymupdf.Rect(rect)))
+        last = (page, line)
+    return marks
+
+
+TEXT_CHANGES = {"replace": "modification", "delete": "suppression", "insert": "ajout"}
+
+
+def text_item(kind, old, new):
+    """Différence de texte entre les mots old (version A) et new (version B), donnés comme dans text_differences.
+    Les mots eux-mêmes sont gardés (raw_a, raw_b) jusqu'à la fin du calcul."""
+    return {"kind": kind, "marks_a": merge_word_rects(old), "marks_b": merge_word_rects(new),
+            "old": excerpt(w[2] for w in old), "new": excerpt(w[2] for w in new), "raw_a": old, "raw_b": new}
+
+
+def word_changes(old, new):
+    """Différences mot à mot entre deux suites de mots (les mots identiques sont ignorés)."""
+    matcher = difflib.SequenceMatcher(None, [w[3] for w in old], [w[3] for w in new], autojunk=False)
+    return [text_item(TEXT_CHANGES[tag], old[a1:a2], new[b1:b2])
+            for tag, a1, a2, b1, b2 in matcher.get_opcodes() if tag != "equal"]
+
+
+def excerpt(texts):
+    """Citation abrégée d'une suite de mots."""
+    text = " ".join(texts)
+    return text if len(text) <= COMPARE_EXCERPT else text[:COMPARE_EXCERPT - 1].rstrip() + "…"
+
+
+def in_background(function, progress):
+    """Exécute function (du Python pur, jamais MuPDF) dans un fil d'exécution à part. Générateur qui produit
+    progress tant que le calcul dure (l'interface reste fluide), puis renvoie son résultat."""
+    outcome = []
+
+    def work():
+        try:
+            outcome.append((True, function()))
+        except Exception as exc:
+            outcome.append((False, exc))
+
+    worker = threading.Thread(target=work, daemon=True)  # abandonné sans attendre si l'on annule
+    worker.start()
+    while worker.is_alive():
+        worker.join(0.01)
+        yield progress
+    succeeded, value = outcome[0]
+    if not succeeded:
+        raise value
+    return value
+
+
+def text_differences(pages_a, pages_b):
+    """Différences de texte entre deux documents, donnés par les mots de chaque page (voir page_words).
+
+    Les lignes sont comparées d'abord (rapide, et insensible au décalage d'un paragraphe inséré), puis les mots
+    des seuls blocs de lignes qui diffèrent. Générateur : produit l'avancement (0 à 1) ; renvoie (différences,
+    mots identiques par couple de pages {(page de A, page de B): nombre}), qui sert à apparier les pages."""
+    def lines(words):
+        result, start = [], 0
+        for index in range(1, len(words) + 1):
+            if index == len(words) or (words[index][0], words[index][4]) != (words[start][0], words[start][4]):
+                result.append((start, index))
+                start = index
+        return result
+
+    def prepare():
+        # Suite des mots (page, rect, texte, clé, ligne) de tout le document, et ses lignes.
+        words = [[(page, rect, text, key, line) for page, list_ in enumerate(pages) for rect, text, key, line in list_]
+                 for pages in (pages_a, pages_b)]
+        spans = [lines(sequence) for sequence in words]
+        keys = [[" ".join(w[3] for w in sequence[s:e]) for s, e in list_] for sequence, list_ in zip(words, spans)]
+        opcodes = difflib.SequenceMatcher(None, *keys, autojunk=False).get_opcodes()
+        return words, spans, opcodes
+
+    (words_a, words_b), (lines_a, lines_b), opcodes = yield from in_background(prepare, 0.0)
+
+    # Blocs de lignes qui diffèrent. Deux blocs séparés par quelques lignes identiques sont comparés ensemble : un
+    # paragraphe dont un mot change est souvent recoupé, et une ligne identique peut s'y glisser par hasard.
+    segments = []
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "equal":
+            segments.append(["equal", i1, i2, j1, j2])
+        elif (len(segments) >= 2 and segments[-2][0] == "block"
+              and segments[-1][2] - segments[-1][1] <= COMPARE_LINE_JOIN):
+            segments.pop()
+            segments[-1][2], segments[-1][4] = i2, j2
+        else:
+            segments.append(["block", i1, i2, j1, j2])
+
+    shared, items = {}, []
+    blocks = sum(1 for segment in segments if segment[0] == "block")
+    done = 0
+    for kind, i1, i2, j1, j2 in segments:
+        if kind == "equal":
+            for k in range(i2 - i1):
+                start_a, end_a = lines_a[i1 + k]
+                key = (words_a[start_a][0], words_b[lines_b[j1 + k][0]][0])
+                shared[key] = shared.get(key, 0) + end_a - start_a
+            continue
+        part_a = words_a[lines_a[i1][0]:lines_a[i2 - 1][1]] if i2 > i1 else []
+        part_b = words_b[lines_b[j1][0]:lines_b[j2 - 1][1]] if j2 > j1 else []
+        done += 1
+
+        def compare_block(part_a=part_a, part_b=part_b):
+            # Tout en arrière-plan, y compris la mise en forme : un très gros bloc (deux documents sans rapport)
+            # figerait sinon l'interface plusieurs secondes. Rien ici n'appelle MuPDF (Rect est du Python pur).
+            sequences = [w[3] for w in part_a], [w[3] for w in part_b]
+            found, common = [], {}
+            for tag, a1, a2, b1, b2 in difflib.SequenceMatcher(None, *sequences, autojunk=False).get_opcodes():
+                if tag == "equal":
+                    for wa, wb in zip(part_a[a1:a2], part_b[b1:b2]):
+                        common[(wa[0], wb[0])] = common.get((wa[0], wb[0]), 0) + 1
+                    continue
+                found.append(text_item(TEXT_CHANGES[tag], part_a[a1:a2], part_b[b1:b2]))
+            return found, common
+
+        found, common = yield from in_background(compare_block, done / blocks)
+        items.extend(found)
+        for key, count in common.items():
+            shared[key] = shared.get(key, 0) + count
+        yield done / blocks
+    return items, shared
+
+
+def marks_overlap(marks_a, marks_b):
+    """Deux suites de rectangles se superposent-elles (même ligne, au moins en partie) ?"""
+    for rect_a in marks_a:
+        for rect_b in marks_b:
+            height = min(rect_a.height, rect_b.height)
+            vertical = min(rect_a.y1, rect_b.y1) - max(rect_a.y0, rect_b.y0)
+            if height > 0 and vertical >= height / 2 and min(rect_a.x1, rect_b.x1) > max(rect_a.x0, rect_b.x0):
+                return True
+    return False
+
+
+def reconcile_rewritten(items, pairs):
+    """Rapproche une suppression et les ajouts écrits au même endroit d'une page appariée.
+
+    Un éditeur de PDF qui modifie un mot l'efface et réécrit la ligne à la fin du contenu de la page : dans l'ordre
+    du fichier, cela ressemble à une suppression et à un ajout éloignés. Superposés, ils sont comparés mot à mot
+    entre eux : seuls les mots changés restent (aucun si le texte n'a été que déplacé dans le fichier)."""
+    paired = {(a, b) for a, b in pairs if a is not None and b is not None}
+    additions = [item for item in items if item["kind"] == "ajout"]
+    dropped, replaced = set(), {}
+    for deletion in [item for item in items if item["kind"] == "suppression"]:
+        pages = {page for page, _ in deletion["marks_a"]}
+        if len(pages) != 1:
+            continue
+        page_a = pages.pop()
+        rects_a = [rect for _, rect in deletion["marks_a"]]
+        group = [addition for addition in additions if id(addition) not in dropped
+                 and all((page_a, page) in paired for page, _ in addition["marks_b"])
+                 and marks_overlap(rects_a, [rect for _, rect in addition["marks_b"]])]
+        if not group:
+            continue
+        dropped.update(id(addition) for addition in group)
+        replaced[id(deletion)] = word_changes(deletion["raw_a"], [w for addition in group for w in addition["raw_b"]])
+    return [change for item in items if id(item) not in dropped for change in replaced.get(id(item), [item])]
+
+
+def visual_differences(page_a, page_b, tolerance, mask_rects=(), gap=COMPARE_GAP, dpi=COMPARE_DPI,
+                       max_zones=COMPARE_MAX_ZONES):
+    """Les zones qui diffèrent, d'un seul tenant (voir visual_differences_steps)."""
+    steps = visual_differences_steps(page_a, page_b, tolerance, mask_rects, gap, dpi, max_zones)
+    while True:
+        try:
+            next(steps)
+        except StopIteration as stop:
+            return stop.value
+
+
+def visual_differences_steps(page_a, page_b, tolerance, mask_rects=(), gap=COMPARE_GAP, dpi=COMPARE_DPI,
+                             max_zones=COMPARE_MAX_ZONES, progress=None):
+    """Zones (Rect, en points de la page affichée) où le rendu des deux pages diffère.
+
+    Les pages sont rendues en couleurs par MuPDF puis comparées par cellules de COMPARE_CELL pixels : une cellule
+    diffère si l'écart d'une composante (rouge, vert ou bleu) d'un de ses pixels dépasse la tolérance (0 à 1). Le
+    gris ne suffirait pas : un bleu et un rouge de même luminosité y sont identiques. Les cellules couvertes par
+    mask_rects (le texte, déjà comparé mot à mot) sont ignorées. Les cellules proches sont réunies en zones."""
+    scale = dpi / 72
+    matrix = pymupdf.Matrix(scale, scale)
+    pix_a = page_a.get_pixmap(matrix=matrix, colorspace=pymupdf.csRGB, alpha=False)
+    pix_b = page_b.get_pixmap(matrix=matrix, colorspace=pymupdf.csRGB, alpha=False)
+    width, height = min(pix_a.width, pix_b.width), min(pix_a.height, pix_b.height)
+    row_bytes, cell_bytes = width * 3, COMPARE_CELL * 3
+    data_a, data_b, stride_a, stride_b = pix_a.samples, pix_b.samples, pix_a.stride, pix_b.stride
+    limit = round(max(0.0, min(1.0, tolerance)) * 255)
+    cell = COMPARE_CELL
+    columns = (width + cell - 1) // cell
+
+    masked = set()
+    for rect in mask_rects:
+        for cy in range(max(0, int(rect.y0 * scale) // cell - 1), int(rect.y1 * scale) // cell + 2):
+            for cx in range(max(0, int(rect.x0 * scale) // cell - 1), int(rect.x1 * scale) // cell + 2):
+                masked.add((cx, cy))
+
+    marked = set()
+    group = 16 * cell_bytes  # les cellules sont d'abord comparées par groupes de 16 : la plupart sont identiques
+    for y in range(height):
+        if y % 32 == 0:
+            yield progress  # générateur : l'interface reprend la main entre deux bandes de la page
+        row_a = data_a[y * stride_a:y * stride_a + row_bytes]
+        row_b = data_b[y * stride_b:y * stride_b + row_bytes]
+        if row_a == row_b:
+            continue
+        cy = y // cell
+        for start in range(0, row_bytes, group):
+            if row_a[start:start + group] == row_b[start:start + group]:
+                continue
+            for x0 in range(start, min(start + group, row_bytes), cell_bytes):
+                cx = x0 // cell_bytes
+                if (cx, cy) in marked or (cx, cy) in masked:
+                    continue
+                chunk_a, chunk_b = row_a[x0:x0 + cell_bytes], row_b[x0:x0 + cell_bytes]
+                if chunk_a != chunk_b and max(abs(p - q) for p, q in zip(chunk_a, chunk_b)) > limit:
+                    marked.add((cx, cy))
+
+    zones = []
+    while marked:
+        stack = [marked.pop()]
+        x0 = x1 = stack[0][0]
+        y0 = y1 = stack[0][1]
+        while stack:
+            cx, cy = stack.pop()
+            x0, x1, y0, y1 = min(x0, cx), max(x1, cx), min(y0, cy), max(y1, cy)
+            for dy in range(-gap, gap + 1):
+                for dx in range(-gap, gap + 1):
+                    neighbour = (cx + dx, cy + dy)
+                    if neighbour in marked:
+                        marked.remove(neighbour)
+                        stack.append(neighbour)
+        zones.append(pymupdf.Rect(x0 * cell / scale, y0 * cell / scale,
+                                  min(width, (x1 + 1) * cell) / scale, min(height, (y1 + 1) * cell) / scale))
+    if len(zones) > max_zones:
+        union = zones[0]
+        for zone in zones[1:]:
+            union |= zone
+        zones = [union]
+    zones.sort(key=lambda r: (r.y0, r.x0))
+    return zones
+
+
+def compare_documents(doc_a, doc_b, options):
+    """Compare deux documents ouverts. Générateur : produit (avancement de 0 à 1, message) après chaque étape, ce
+    qui laisse l'interface répondre et permet d'annuler ; renvoie le résultat (StopIteration.value).
+
+    Tout le travail de MuPDF a lieu dans le fil qui appelle (MuPDF ne se partage pas entre fils d'exécution).
+    options : mode (« both », « text » ou « visual »), ignore_case, ignore_punctuation, tolerance (0 à 1)."""
+    mode = options.get("mode", "both")
+    ignore_case = options.get("ignore_case", False)
+    ignore_punctuation = options.get("ignore_punctuation", False)
+    n, m = len(doc_a), len(doc_b)
+    total = max(1, n + m)
+    notes = []
+
+    # 1. Lecture des mots de chaque page (30 %).
+    infos = ([], [])
+    for side, doc in enumerate((doc_a, doc_b)):
+        for index, page in enumerate(doc):
+            words = page_words(page, ignore_case, ignore_punctuation)
+            infos[side].append({"words": words, "thumb": None, "rect": pymupdf.Rect(page.rect),
+                                "name": page_name(page, words)})
+            done = index + 1 + (n if side else 0)
+            yield 0.3 * done / total, f"Lecture de la version {'AB'[side]} : page {index + 1} / {len(doc)}"
+    infos_a, infos_b = infos
+    text_a = any(info["words"] for info in infos_a)
+    text_b = any(info["words"] for info in infos_b)
+    use_text = text_a and text_b
+    for name, has_text in (("A", text_a), ("B", text_b)):
+        if not has_text and (n if name == "A" else m):
+            notes.append(f"La version {name} ne contient pas de texte (PDF scanné ou image) : seule la comparaison "
+                         "visuelle est possible.")
+    text_mode = mode in ("both", "text") and use_text
+    visual_mode = mode in ("both", "visual") or (mode == "text" and not use_text)
+    if mode == "text" and not use_text:
+        notes.append("Comparaison du texte impossible : la comparaison visuelle a été faite à la place.")
+
+    # 2. Texte, mot à mot, sur l'ensemble du document : un paragraphe qui passe à la page suivante n'est pas
+    # signalé comme supprimé puis ajouté (25 %). Fait aussi en mode visuel seul : il sert à apparier les pages.
+    items, shared = [], {}
+    if use_text:
+        differ = text_differences([info["words"] for info in infos_a], [info["words"] for info in infos_b])
+        while True:
+            try:
+                fraction = next(differ)
+            except StopIteration as stop:
+                items, shared = stop.value
+                break
+            yield 0.3 + 0.25 * fraction, "Comparaison du texte…"
+        if not text_mode:
+            items = []
+
+    # Vignettes des pages sans texte, pour les apparier (5 %).
+    need = [(side, index) for side, list_ in enumerate(infos) for index, info in enumerate(list_)
+            if not use_text or not info["words"]]
+    for count, (side, index) in enumerate(need):
+        infos[side][index]["thumb"] = page_thumbnail((doc_a, doc_b)[side][index])
+        yield 0.55 + 0.05 * (count + 1) / len(need), "Préparation des pages sans texte…"
+
+    # 3. Appariement des pages, d'après les mots retrouvés à l'identique, ou l'aspect des pages sans texte (5 %).
+    def similarity(i, j):
+        """(ressemblance de 0 à 1, seuil d'appariement) de la page i de A et de la page j de B."""
+        a, b = infos_a[i], infos_b[j]
+        if use_text and (a["words"] or b["words"]):
+            if not (a["words"] and b["words"]):
+                return 0.0, 1.0  # une page avec du texte et une sans : pas apparentées
+            return shared.get((i, j), 0) / max(len(a["words"]), len(b["words"])), COMPARE_TEXT_SIMILARITY
+        return thumbnail_similarity(a["thumb"], b["thumb"]), COMPARE_IMAGE_SIMILARITY
+
+    aligner = align_pages(n, m, similarity)
+    while True:
+        try:
+            fraction = next(aligner)
+        except StopIteration as stop:
+            pairs = stop.value
+            break
+        yield 0.6 + 0.05 * fraction, "Appariement des pages…"
+    pair_of_a = {a: k for k, (a, b) in enumerate(pairs) if a is not None}
+    pair_of_b = {b: k for k, (a, b) in enumerate(pairs) if b is not None}
+
+    items = reconcile_rewritten(items, pairs)
+
+    # Pages sans équivalent : ajoutées ou supprimées si leur texte est surtout nouveau (ou absent), sinon simple
+    # décalage de la mise en page (texte venu de pages voisines).
+    changed_a, changed_b = {}, {}
+    for item in items:
+        for page, *_ in item.get("raw_a", ()):
+            changed_a[page] = changed_a.get(page, 0) + 1
+        for page, *_ in item.get("raw_b", ()):
+            changed_b[page] = changed_b.get(page, 0) + 1
+    whole_a, whole_b, page_items = set(), set(), []
+    for k, (a, b) in enumerate(pairs):
+        if a is not None and b is not None:
+            continue
+        side, index = ("a", a) if b is None else ("b", b)
+        info = (infos_a if side == "a" else infos_b)[index]
+        changed = (changed_a if side == "a" else changed_b).get(index, 0)
+        words = len(info["words"])
+        if not text_mode or words == 0 or changed >= COMPARE_NEW_PAGE_SHARE * words:
+            (whole_a if side == "a" else whole_b).add(index)
+            kind = "page_supprimee" if side == "a" else "page_ajoutee"
+            detail = (f"Page {index + 1} de A, absente de B" if side == "a"
+                      else f"Page {index + 1} de B, absente de A")
+        else:
+            kind = "mise_en_page"
+            detail = (f"Page {index + 1} de {'A' if side == 'a' else 'B'} sans équivalent dans "
+                      f"{'B' if side == 'a' else 'A'} : texte décalé d'une page à l'autre (contenu ajouté ou "
+                      "retiré plus haut)")
+        rect = info["rect"]
+        page_items.append({"kind": kind, "marks_a": [(index, pymupdf.Rect(rect))] if side == "a" else [],
+                           "marks_b": [(index, pymupdf.Rect(rect))] if side == "b" else [],
+                           "old": "", "new": "", "detail": detail, "page_level": True})
+    if whole_a or whole_b:  # le texte d'une page ajoutée ou supprimée n'est pas énuméré mot par mot
+        kept = []
+        for item in items:
+            item["marks_a"] = [mark for mark in item["marks_a"] if mark[0] not in whole_a]
+            item["marks_b"] = [mark for mark in item["marks_b"] if mark[0] not in whole_b]
+            if item["marks_a"] or item["marks_b"]:
+                kept.append(item)
+        items = kept
+    items.extend(page_items)
+
+    # 4. Comparaison visuelle des pages appariées (35 %).
+    if visual_mode:
+        compared = [(k, a, b) for k, (a, b) in enumerate(pairs) if a is not None and b is not None]
+        for count, (k, a, b) in enumerate(compared):
+            page_a, page_b = doc_a[a], doc_b[b]
+            ra, rb = page_a.rect, page_b.rect
+            if abs(ra.width - rb.width) > 1 or abs(ra.height - rb.height) > 1:
+                items.append({"kind": "mise_en_page", "marks_a": [(a, pymupdf.Rect(ra))],
+                              "marks_b": [(b, pymupdf.Rect(rb))], "old": "", "new": "", "page_level": True,
+                              "detail": f"Format de page différent : {ra.width:.0f} × {ra.height:.0f} pt "
+                                        f"→ {rb.width:.0f} × {rb.height:.0f} pt"})
+            mask = []
+            if text_mode:
+                # Les mots changés ou déplacés sont déjà comparés mot à mot : ils sont masqués. Un mot identique resté
+                # exactement à sa place, lui, reste comparé à l'image : un changement de couleur, de police, un
+                # surlignage ou un tampon posé dessus doivent apparaître.
+                words_a, words_b = infos_a[a]["words"], infos_b[b]["words"]
+                kept_a = {id(w) for w in unmoved_words(words_a, words_b)}
+                kept_b = {id(w) for w in unmoved_words(words_b, words_a)}
+                mask = ([w[0] for w in words_a if id(w) not in kept_a]
+                        + [w[0] for w in words_b if id(w) not in kept_b])
+            fine = options.get("preset") == "plan"
+            zones = yield from visual_differences_steps(
+                page_a, page_b, options.get("tolerance", 0.1), mask, COMPARE_GAP_FINE if fine else COMPARE_GAP,
+                COMPARE_DPI_FINE if fine else COMPARE_DPI, COMPARE_MAX_ZONES_FINE if fine else COMPARE_MAX_ZONES,
+                (0.65 + 0.35 * count / max(1, len(compared)), f"Comparaison visuelle : page {count + 1} / {len(compared)}"))
+            for zone in zones:
+                items.append({"kind": "visuel", "marks_a": [(a, zone & ra)], "marks_b": [(b, zone & rb)],
+                              "old": "", "new": "", "detail": visual_detail(zone)})
+            yield 0.65 + 0.35 * (count + 1) / max(1, len(compared)), \
+                f"Comparaison visuelle : page {count + 1} / {len(compared)}"
+
+    # Ordre de lecture : par couple de pages, puis de haut en bas.
+    for item in items:
+        item.pop("raw_a", None)
+        item.pop("raw_b", None)
+        item["page_a"] = item["marks_a"][0][0] if item["marks_a"] else None
+        item["page_b"] = item["marks_b"][0][0] if item["marks_b"] else None
+        item["pair"] = pair_of_b[item["page_b"]] if item["page_b"] is not None else pair_of_a[item["page_a"]]
+        first = (item["marks_b"] or item["marks_a"])[0][1]
+        item["order"] = (item["pair"], not item.get("page_level"), first.y0, first.x0)
+    items.sort(key=lambda item: item["order"])
+    yield 1.0, "Terminé."
+    return {"pairs": pairs, "items": items, "notes": notes, "pages_a": n, "pages_b": m,
+            "names": ([info["name"] for info in infos_a], [info["name"] for info in infos_b]),
+            "text_used": text_mode, "visual_used": visual_mode, "options": dict(options)}
+
+
+def millimetres(points):
+    """Points PDF en millimètres, à la française : 12,3."""
+    return f"{points * 25.4 / 72:.1f}".replace(".", ",")
+
+
+def visual_detail(zone):
+    """Description d'un changement visuel : sa taille et sa position, en mm depuis le coin haut gauche de la page."""
+    return (f"zone de {millimetres(zone.width)} × {millimetres(zone.height)} mm à x {millimetres(zone.x0)} mm, "
+            f"y {millimetres(zone.y0)} mm (image, dessin, couleur ou mise en page)")
+
+
+def compare_counts(items):
+    """Nombre de différences par type, dans l'ordre de COMPARE_KINDS."""
+    counts = {}
+    for item in items:
+        counts[item["kind"]] = counts.get(item["kind"], 0) + 1
+    return {kind: counts[kind] for kind in COMPARE_KINDS if kind in counts}
+
+
+def compare_summary_text(items):
+    """« 3 modifications, 1 ajout… » (vide s'il n'y a aucune différence)."""
+    parts = []
+    for kind, count in compare_counts(items).items():
+        label = COMPARE_KINDS[kind][2] if count > 1 else COMPARE_KINDS[kind][1].lower()
+        parts.append(f"{count} {label}")
+    return ", ".join(parts)
+
+
+def compare_description(item):
+    """Description d'une différence en une ligne."""
+    kind = item["kind"]
+    if kind == "modification":
+        return f"« {item['old']} » → « {item['new']} »"
+    if kind == "ajout":
+        return f"« {item['new']} »"
+    if kind == "suppression":
+        return f"« {item['old']} »"
+    return item.get("detail", "")
+
+
+def pair_title(pair, names=None):
+    """Titre d'un couple de pages, précédé du nom de la couche quand il est connu (« B.Cu — page 2 de A ↔ … »)."""
+    a, b = pair
+    name_a = names[0][a] if names and a is not None and a < len(names[0]) else ""
+    name_b = names[1][b] if names and b is not None and b < len(names[1]) else ""
+    name = name_a if name_a == name_b or not name_b else name_b if not name_a else f"{name_a} / {name_b}"
+    prefix = f"{name} — " if name else ""
+    if a is None:
+        return f"{prefix}Page {b + 1} de B (sans équivalent dans A)"
+    if b is None:
+        return f"{prefix}Page {a + 1} de A (sans équivalent dans B)"
+    return f"{prefix}Page {a + 1} de A ↔ page {b + 1} de B"
+
+
+def hex_rgb(color):
+    """« #16a34a » → (r, g, b) de 0 à 1, pour PyMuPDF."""
+    color = QColor(color)
+    return color.redF(), color.greenF(), color.blueF()
+
+
+FRENCH_MONTHS = ("janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre",
+                 "octobre", "novembre", "décembre")
+
+
+def report_fonts():
+    """Polices du rapport (normale, grasse) : Arial de Windows pour les accents et les symboles, sinon la police
+    standard des PDF (Helvetica, limitée aux caractères latins)."""
+    for directory in SYSTEM_FONT_DIRS:
+        regular, bold = os.path.join(directory, "arial.ttf"), os.path.join(directory, "arialbd.ttf")
+        if os.path.isfile(regular) and os.path.isfile(bold):
+            return regular, bold
+    return None, None
+
+
+class ReportWriter:
+    """Écriture ligne à ligne des pages de synthèse du rapport, avec passage automatique à la page suivante."""
+
+    WIDTH, HEIGHT, MARGIN = 595, 842, 48
+
+    def __init__(self, doc):
+        self.doc = doc
+        self.regular_file, self.bold_file = report_fonts()
+        self.fonts = {False: pymupdf.Font(fontfile=self.regular_file) if self.regular_file else pymupdf.Font("helv"),
+                      True: pymupdf.Font(fontfile=self.bold_file) if self.bold_file else pymupdf.Font("hebo")}
+        self.page = None
+        self.y = 0
+        self.inserted = set()  # (page, police) déjà intégrées
+        self.new_page()
+
+    def new_page(self):
+        self.page = self.doc.new_page(width=self.WIDTH, height=self.HEIGHT)
+        self.y = self.MARGIN
+
+    def text(self, page, point, text, size=10, bold=False, color=(0.12, 0.16, 0.23)):
+        if self.regular_file:
+            name, fontfile = ("rapportg", self.bold_file) if bold else ("rapport", self.regular_file)
+            if (page.xref, name) not in self.inserted:
+                page.insert_font(fontname=name, fontfile=fontfile)
+                self.inserted.add((page.xref, name))
+        else:
+            name = "hebo" if bold else "helv"
+            text = text.replace("→", "->").replace("↔", "<->").encode("cp1252", "replace").decode("cp1252")
+        page.insert_text(point, text, fontsize=size, fontname=name, color=color)
+
+    def fit(self, text, width, size=10, bold=False):
+        """Texte raccourci (…) pour tenir dans la largeur donnée."""
+        font = self.fonts[bold]
+        if font.text_length(text, size) <= width:
+            return text
+        while text and font.text_length(text + "…", size) > width:
+            text = text[:-1]
+        return text.rstrip() + "…"
+
+    def line(self, text="", size=10, bold=False, color=(0.12, 0.16, 0.23), indent=0, gap=4, swatch=None):
+        """Une ligne de texte ; swatch : couleur d'un petit carré dessiné devant."""
+        if self.y + size + gap > self.HEIGHT - self.MARGIN:
+            self.new_page()
+        self.y += size
+        x = self.MARGIN + indent
+        if swatch is not None:
+            self.page.draw_rect(pymupdf.Rect(x, self.y - size * 0.8, x + size * 0.8, self.y), color=None,
+                                fill=swatch)
+            x += size * 1.3
+        if text:
+            self.text(self.page, (x, self.y), self.fit(text, self.WIDTH - self.MARGIN - x, size, bold), size, bold,
+                      color)
+        self.y += gap
+
+    def columns(self, values, positions, size=9, bold=False, color=(0.12, 0.16, 0.23), swatch=None):
+        """Une ligne de tableau : values[k] écrit à partir de positions[k] (en points depuis la marge)."""
+        if self.y + size + 4 > self.HEIGHT - self.MARGIN:
+            self.new_page()
+        self.y += size
+        limits = list(positions[1:]) + [self.WIDTH - 2 * self.MARGIN]
+        for k, (value, x, end) in enumerate(zip(values, positions, limits)):
+            if swatch is not None and k == 2:
+                self.page.draw_rect(pymupdf.Rect(self.MARGIN + x, self.y - size * 0.8,
+                                                 self.MARGIN + x + size * 0.8, self.y), color=None, fill=swatch)
+                x += size * 1.2
+            self.text(self.page, (self.MARGIN + x, self.y), self.fit(str(value), end - x - 6, size, bold), size,
+                      bold, color)
+        self.y += 4
+
+    def rule(self):
+        self.y += 2
+        self.page.draw_line((self.MARGIN, self.y), (self.WIDTH - self.MARGIN, self.y), color=(0.89, 0.91, 0.94),
+                            width=0.8)
+        self.y += 6
+
+
+def comparison_report(result, doc_a, doc_b, name_a, name_b):
+    """Rapport PDF : synthèse et liste numérotée des différences, puis, pour chaque couple de pages qui diffère,
+    la version A à gauche et la version B à droite, surlignées par des annotations (numérotées comme la liste,
+    avec la description de la différence)."""
+    report = pymupdf.open()
+    writer = ReportWriter(report)
+    items, pairs, options = result["items"], result["pairs"], result["options"]
+    names = result.get("names")
+    slate = hex_rgb(SLATE)
+
+    writer.line("Comparaison de deux PDF", size=20, bold=True, gap=8)
+    now = time.localtime()
+    writer.line(f"Rapport établi le {now.tm_mday} {FRENCH_MONTHS[now.tm_mon - 1]} {now.tm_year} à "
+                f"{now.tm_hour} h {now.tm_min:02d} par {APP_NAME}", size=9, color=slate, gap=12)
+    writer.line(f"Version A : {name_a} ({result['pages_a']} page{'s' if result['pages_a'] > 1 else ''})", bold=True)
+    writer.line(f"Version B : {name_b} ({result['pages_b']} page{'s' if result['pages_b'] > 1 else ''})", bold=True)
+    mode = dict(COMPARE_MODES)[options.get("mode", "both")]
+    details = [f"comparaison : {mode.lower()}"]
+    if options.get("ignore_case"):
+        details.append("casse ignorée")
+    if options.get("ignore_punctuation"):
+        details.append("ponctuation et espaces ignorés")
+    if result["visual_used"]:
+        details.append(f"tolérance visuelle {round(options.get('tolerance', 0.1) * 100)} %")
+        if options.get("preset") == "plan":
+            details.append("réglage plan technique (zones fines)")
+    writer.line("Options : " + ", ".join(details), size=9, color=slate, gap=6)
+    for note in result["notes"]:
+        writer.line(note, size=9, color=hex_rgb("#b45309"))
+    writer.rule()
+
+    writer.line("Résumé", size=13, bold=True, gap=6)
+    if not items:
+        writer.line("Aucune différence trouvée : les deux versions sont identiques selon les options choisies.")
+    else:
+        writer.line(f"{len(items)} différence{'s' if len(items) > 1 else ''} au total", bold=True, gap=6)
+        for kind, count in compare_counts(items).items():
+            color, label, plural = COMPARE_KINDS[kind]
+            writer.line(f"{label if count == 1 else plural.capitalize()} : {count}", indent=8,
+                        swatch=hex_rgb(color))
+        writer.y += 6
+        writer.line("Différences par page", size=13, bold=True, gap=6)
+        positions = (0, 210, 262, 314, 366, 418)
+        writer.columns(("Pages", "Ajouts", "Suppr.", "Modif.", "Visuel", "Autres"), positions, bold=True,
+                       color=slate)
+        by_pair = {}
+        for item in items:
+            by_pair.setdefault(item["pair"], []).append(item)
+        for k in sorted(by_pair):
+            counts = compare_counts(by_pair[k])
+            others = sum(counts.get(kind, 0) for kind in COMPARE_PAGE_KINDS)
+            writer.columns([pair_title(pairs[k], names)] + [counts.get(kind, "") or "" for kind in
+                                                     ("ajout", "suppression", "modification", "visuel")]
+                           + [others or ""], positions)
+        writer.y += 6
+        writer.line("Liste des différences", size=13, bold=True, gap=4)
+        writer.line("Les numéros renvoient aux annotations des pages suivantes (version A à gauche, version B à "
+                    "droite), puis aux gros plans de la fin du rapport.", size=9, color=slate, gap=6)
+        positions = (0, 26, 96, 200)
+        writer.columns(("N°", "Pages", "Type", "Détail"), positions, bold=True, color=slate)
+        for number, item in enumerate(items, 1):
+            pages = " · ".join(f"{side} {page + 1}" for side, page in (("A", item["page_a"]), ("B", item["page_b"]))
+                               if page is not None)
+            color, label, _ = COMPARE_KINDS[item["kind"]]
+            writer.columns((number, pages, label, compare_description(item)), positions, swatch=hex_rgb(color))
+
+    # Pages annotées : un feuillet par couple de pages qui diffère.
+    marks = {}  # (côté, page) -> [(numéro, différence, rect)]
+    for number, item in enumerate(items, 1):
+        for side in ("a", "b"):
+            for page, rect in item["marks_" + side]:
+                marks.setdefault((side, page), []).append((number, item, rect))
+    margin, header, gap = 24, 46, 24
+    for k, (a, b) in enumerate(pairs):
+        if (a is None or ("a", a) not in marks) and (b is None or ("b", b) not in marks):
+            continue
+        rect_a = doc_a[a].rect if a is not None else doc_b[b].rect
+        rect_b = doc_b[b].rect if b is not None else doc_a[a].rect
+        width = margin * 2 + gap + rect_a.width + rect_b.width
+        height = header + margin + max(rect_a.height, rect_b.height)
+        sheet = report.new_page(width=width, height=height)
+        title = pair_title((a, b), names)
+        count = len({id(entry[1]) for side, page in (("a", a), ("b", b)) if page is not None
+                     for entry in marks.get((side, page), [])})
+        writer.text(sheet, (margin, 22), f"{title} — {count} différence{'s' if count > 1 else ''}", 12, True)
+        for side, index, doc, origin, rect, name in (
+                ("a", a, doc_a, margin, rect_a, name_a),
+                ("b", b, doc_b, margin + rect_a.width + gap, rect_b, name_b)):
+            place = pymupdf.Rect(origin, header, origin + rect.width, header + rect.height)
+            writer.text(sheet, (origin, header - 8),
+                        writer.fit(f"Version {side.upper()} — {name}", rect.width, 9), 9, False, slate)
+            if index is None:
+                sheet.draw_rect(place, color=(0.8, 0.83, 0.87), fill=(0.97, 0.98, 0.99), dashes="[4] 0", width=1)
+                writer.text(sheet, (place.x0 + 16, place.y0 + 30), "Pas de page correspondante", 11, False, slate)
+                continue
+            sheet.show_pdf_page(place, doc, index)
+            sheet.draw_rect(place, color=(0.8, 0.83, 0.87), width=0.6)
+            numbered = set()
+            for number, item, mark in marks.get((side, index), []):
+                target = pymupdf.Rect(mark.x0 + place.x0, mark.y0 + place.y0, mark.x1 + place.x0,
+                                      mark.y1 + place.y0)
+                color = hex_rgb(COMPARE_KINDS[item["kind"]][0])
+                label = COMPARE_KINDS[item["kind"]][1]
+                if item["kind"] in COMPARE_TEXT_KINDS:
+                    annot = sheet.add_highlight_annot(target)
+                    annot.set_colors(stroke=color)
+                    opacity = 0.45
+                else:
+                    annot = sheet.add_rect_annot(target)
+                    annot.set_colors(stroke=color)
+                    annot.set_border(width=2.5 if item.get("page_level") else 1.5)
+                    opacity = 1
+                annot.set_info(title=APP_NAME, subject=label,
+                               content=f"{number}. {label} : {compare_description(item)}")
+                annot.update(opacity=opacity)
+                if number not in numbered:
+                    numbered.add(number)
+                    writer.text(sheet, (target.x0, max(header + 7, target.y0 - 1.5)), str(number), 7, True, color)
+    report_details(report, writer, result, doc_a, doc_b)
+    if report_fonts()[0]:
+        report.subset_fonts()
+        fix_space_unicode(report)
+    return report
+
+
+def fix_space_unicode(doc):
+    """Arial dessine l'espace et l'espace insécable avec le même glyphe, et MuPDF déclare l'insécable dans la table
+    ToUnicode : le texte copié ou cherché dans le rapport aurait des espaces insécables (« Gros plans » introuvable).
+    La table des polices du document est corrigée pour annoncer de vraies espaces."""
+    for xref in range(1, doc.xref_length()):
+        kind, value = doc.xref_get_key(xref, "ToUnicode")
+        if kind != "xref":
+            continue
+        target = int(value.split()[0])
+        stream = doc.xref_stream(target)
+        if stream and (b"<00A0>" in stream or b"<00a0>" in stream):
+            doc.update_stream(target, stream.replace(b"<00A0>", b"<0020>").replace(b"<00a0>", b"<0020>"))
+
+
+def detail_clip(rect, page_rect):
+    """Cadre carré d'un gros plan autour d'une zone : la zone et ses abords (au moins 12 mm de côté), dans la page."""
+    side = max(rect.width, rect.height) * 1.5 + 18
+    side = min(max(side, 34), max(page_rect.width, page_rect.height))
+    center = rect.tl + (rect.br - rect.tl) * 0.5
+    clip = pymupdf.Rect(center.x - side / 2, center.y - side / 2, center.x + side / 2, center.y + side / 2)
+    # Ramené dans la page sans le réduire, tant qu'il y tient.
+    dx = max(page_rect.x0 - clip.x0, 0) - max(clip.x1 - page_rect.x1, 0)
+    dy = max(page_rect.y0 - clip.y0, 0) - max(clip.y1 - page_rect.y1, 0)
+    return (clip + (dx, dy, dx, dy)) & page_rect
+
+
+def report_details(report, writer, result, doc_a, doc_b):
+    """Gros plans à la fin du rapport : pour chaque différence, la zone et ses abords dans A, dans B et superposés
+    (rouge : seulement dans A, vert : seulement dans B), avec sa position en millimètres depuis le coin de la page."""
+    items, pairs, names = result["items"], result["pairs"], result.get("names")
+    shown = [(number, item) for number, item in enumerate(items, 1) if not item.get("page_level")]
+    if not shown:
+        return
+    slate = hex_rgb(SLATE)
+    width, height, margin = writer.WIDTH, writer.HEIGHT, 36
+    gap, caption = 10, 30
+    panel = (width - 2 * margin - 2 * gap) / 3
+    row = caption + panel + 18
+    rows_per_page = int((height - 2 * margin - 30) // row)
+    sheet, y = None, 0
+    for count, (number, item) in enumerate(shown):
+        if count == COMPARE_REPORT_DETAILS:
+            writer.text(sheet, (margin, min(y + 12, height - margin)),
+                        f"Les {len(shown) - count} différences suivantes ne sont pas montrées en gros plan.", 9, False,
+                        slate)
+            break
+        if sheet is None or count % rows_per_page == 0:
+            sheet = report.new_page(width=width, height=height)
+            writer.text(sheet, (margin, margin), "Gros plans des différences", 14, True)
+            writer.text(sheet, (margin, margin + 14), "A : ancienne version · B : nouvelle version · superposition : "
+                        "rouge = seulement dans A, vert = seulement dans B, noir = identique", 8, False, slate)
+            y = margin + 30
+        page_a, page_b = item["page_a"], item["page_b"]
+        pair = pairs[item["pair"]]
+        page_a = pair[0] if page_a is None else page_a
+        page_b = pair[1] if page_b is None else page_b
+        marks = item["marks_b"] or item["marks_a"]
+        zone = pymupdf.Rect(marks[0][1])
+        for _, rect in marks[1:]:
+            zone |= rect
+        reference = doc_b[page_b] if page_b is not None else doc_a[page_a]
+        clip = detail_clip(zone, reference.rect)
+        color, label, _ = COMPARE_KINDS[item["kind"]]
+        title = pair_title(pair, names).split(" — ")[0] if names and " — " in pair_title(pair, names) else ""
+        head = f"{number}. {label}" + (f" · {title}" if title else "") + f" : {compare_description(item)}"
+        writer.text(sheet, (margin, y + 10), writer.fit(head, width - 2 * margin, 9.5, True), 9.5, True, hex_rgb(color))
+        writer.text(sheet, (margin, y + 22), f"Zone : x {millimetres(zone.x0)} à {millimetres(zone.x1)} mm, "
+                    f"y {millimetres(zone.y0)} à {millimetres(zone.y1)} mm, depuis le coin haut gauche de la page (A page "
+                    f"{'—' if page_a is None else page_a + 1}, B page {'—' if page_b is None else page_b + 1})", 8,
+                    False, slate)
+        top = y + caption
+        for k, (title_panel, doc, index) in enumerate((("A", doc_a, page_a), ("B", doc_b, page_b),
+                                                       ("Superposition", None, None))):
+            place = pymupdf.Rect(margin + k * (panel + gap), top, margin + k * (panel + gap) + panel, top + panel)
+            writer.text(sheet, (place.x0, place.y1 + 11), title_panel, 8, True, slate)
+            scale = min(place.width / clip.width, place.height / clip.height)
+            shown_rect = pymupdf.Rect(0, 0, clip.width * scale, clip.height * scale)
+            shown_rect += (place.x0 + (place.width - shown_rect.width) / 2, place.y0 + (place.height - shown_rect.height) / 2) * 2
+            if doc is None:
+                if page_a is None or page_b is None:
+                    writer.text(sheet, (place.x0 + 8, place.y0 + 20), "Une seule version", 9, False, slate)
+                    continue
+                zoom = min(8.0, 2 * place.width / clip.width)
+                pix = overlay_pixmap(doc_a[page_a], doc_b[page_b], pymupdf.Matrix(zoom, zoom), clip)
+                sheet.insert_image(shown_rect, pixmap=pix)
+            elif index is None:
+                writer.text(sheet, (place.x0 + 8, place.y0 + 20), "Pas de page correspondante", 9, False, slate)
+                continue
+            else:
+                source = doc[index]
+                sheet.show_pdf_page(shown_rect, doc, index, clip=clip * source.derotation_matrix
+                                    if source.rotation else clip)
+            frame = pymupdf.Rect(shown_rect.x0 + (zone.x0 - clip.x0) * scale, shown_rect.y0 + (zone.y0 - clip.y0) * scale,
+                                 shown_rect.x0 + (zone.x1 - clip.x0) * scale, shown_rect.y0 + (zone.y1 - clip.y0) * scale)
+            sheet.draw_rect(frame + (-2, -2, 2, 2), color=hex_rgb(color), width=1.2, dashes="[3] 0")
+        for k in range(3):  # cadres dessinés en dernier : l'image ou la page ne les recouvre pas
+            sheet.draw_rect(pymupdf.Rect(margin + k * (panel + gap), top, margin + k * (panel + gap) + panel, top + panel),
+                            color=(0.8, 0.83, 0.87), width=0.6)
+        y += row
+
+
+class ComparePageWidget(QWidget):
+    """Une page dans la vue comparée : bandeau (numéro, état), rendu de la page et surlignage des différences."""
+
+    def __init__(self, view, index):
+        super().__init__()
+        self.view = view
+        self.index = index
+
+    def paintEvent(self, event):
+        view = self.view
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        state = view.page_states.get(self.index)
+        label, color = f"Page {self.index + 1}", QColor(SLATE)
+        if view.names.get(self.index):
+            label += f"  ·  {view.names[self.index]}"
+        if self.index in view.partners and view.partners[self.index] != self.index:
+            label += f"  ↔  page {view.partners[self.index] + 1} de {'B' if view.side == 'a' else 'A'}"
+        if view.overlay is not None:
+            partner = view.overlay_partner(self.index)
+            label += (f"  —  superposée à la page {partner + 1} de B" if partner is not None
+                      else "  —  sans page correspondante dans B")
+        if state is not None:
+            label += f"  —  {COMPARE_KINDS[state][1].lower()}"
+            color = QColor(COMPARE_KINDS[state][0])
+        font = painter.font()
+        font.setPointSizeF(9)
+        font.setBold(state is not None)
+        painter.setFont(font)
+        painter.setPen(color)
+        painter.drawText(QRectF(2, 0, self.width() - 4, COMPARE_HEADER - 4),
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, label)
+
+        top = COMPARE_HEADER
+        pixmap = view.page_pixmap(self.index)
+        target = QRectF(0, top, self.width(), self.height() - top)
+        if pixmap is not None:
+            painter.drawPixmap(target, pixmap, QRectF(pixmap.rect()))
+        else:
+            painter.fillRect(target, QColor("#ffffff"))
+        painter.setPen(QPen(QColor("#cbd5e1"), 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(target.adjusted(0, 0, -1, -1))
+
+        zoom = view.zoom
+        for rect, kind, number in view.page_marks(self.index):
+            selected = number == view.selected
+            color = QColor(COMPARE_KINDS[kind][0])
+            area = QRectF(rect.x0 * zoom, top + rect.y0 * zoom, rect.width * zoom, rect.height * zoom)
+            if kind in COMPARE_PAGE_KINDS:
+                fill = QColor(color)
+                fill.setAlpha(28)
+                painter.fillRect(area, fill)
+                painter.setPen(QPen(color, 5 if selected else 3))
+                painter.drawRect(area.adjusted(1.5, 1.5, -1.5, -1.5))
+                continue
+            area = area.adjusted(-1.5, -1.5, 1.5, 1.5)
+            fill = QColor(color)
+            fill.setAlpha((150 if selected else 90) if kind in COMPARE_TEXT_KINDS else (45 if selected else 18))
+            # Teinte « multipliée » : le texte surligné reste noir et lisible, comme avec un surligneur.
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Multiply)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(fill)
+            painter.drawRoundedRect(area, 2, 2)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(color, 2 if selected else 1))
+            painter.drawRoundedRect(area, 2, 2)
+            if selected:
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(QColor(ACCENT), 1.5, Qt.PenStyle.DashLine))
+                painter.drawRoundedRect(area.adjusted(-4, -4, 4, 4), 4, 4)
+        painter.end()
+
+
+class CompareView(QScrollArea):
+    """Une des deux versions, pages les unes sous les autres, rendues à la demande (un gros document ne remplit
+    pas la mémoire) et surlignées selon les différences trouvées."""
+
+    scrolled = Signal()
+    wheel_zoom = Signal(float)
+
+    CACHE = 24  # pages rendues gardées en mémoire
+
+    def __init__(self, side, parent=None):
+        super().__init__(parent)
+        self.side = side
+        self.setObjectName("viewer")
+        self.setWidgetResizable(True)
+        self.doc = None
+        self.zoom = 1.0
+        self.widgets = []
+        self.cache = {}
+        self.marks = {}  # page -> [(Rect, type, numéro de la différence)]
+        self.page_states = {}  # page -> type de différence propre à la page entière
+        self.partners = {}  # page -> page appariée de l'autre version
+        self.names = {}  # page -> nom de la couche (« B.Cu »…), connu après la comparaison
+        self.overlay = None  # vue de l'autre version, quand les pages sont superposées
+        self.selected = None
+        self.container = QWidget()
+        self.container.setObjectName("viewer")
+        self.layout_ = QVBoxLayout(self.container)
+        self.layout_.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.layout_.setContentsMargins(16, 12, 16, 16)
+        self.layout_.setSpacing(16)
+        self.setWidget(self.container)
+        self.verticalScrollBar().valueChanged.connect(self.scrolled)
+        self.horizontalScrollBar().valueChanged.connect(self.scrolled)
+        self.viewport().installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if (watched is self.viewport() and event.type() == QEvent.Type.Wheel
+                and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            steps = event.angleDelta().y() / 120
+            if steps:
+                self.wheel_zoom.emit(1.15 ** steps)
+            return True
+        return super().eventFilter(watched, event)
+
+    def set_document(self, doc):
+        for widget in self.widgets:
+            self.layout_.removeWidget(widget)  # retirée tout de suite, sans attendre sa destruction
+            widget.hide()
+            widget.deleteLater()
+        self.widgets, self.cache = [], {}
+        self.marks, self.page_states, self.partners, self.selected = {}, {}, {}, None
+        self.names = {}
+        self.doc = doc
+        if doc is not None:
+            for index in range(len(doc)):
+                widget = ComparePageWidget(self, index)
+                self.layout_.addWidget(widget)
+                self.widgets.append(widget)
+            self._resize_pages()
+
+    def set_zoom(self, zoom):
+        self.zoom = zoom
+        self.cache = {}
+        self._resize_pages()
+
+    def _resize_pages(self):
+        if self.doc is None:
+            return
+        for widget in self.widgets:
+            rect = self.doc[widget.index].rect
+            widget.setFixedSize(max(1, round(rect.width * self.zoom)),
+                                max(1, round(rect.height * self.zoom)) + COMPARE_HEADER)
+        self.layout_.activate()
+        self.container.resize(self.container.sizeHint().expandedTo(self.viewport().size()))
+        self.layout_.activate()
+
+    def set_overlay(self, other):
+        """Superpose les pages de l'autre vue (version B) à celles-ci, ou revient aux pages seules (None)."""
+        self.overlay = other
+        self.cache = {}
+        self.refresh()
+
+    def overlay_partner(self, index):
+        """Page de B superposée à la page index : celle qui lui est appariée, ou la même avant toute comparaison."""
+        other = self.overlay
+        if other is None or other.doc is None:
+            return None
+        if self.partners:
+            return self.partners.get(index)
+        return index if index < len(other.doc) else None
+
+    def page_marks(self, index):
+        """Les différences dessinées sur la page ; superposée, celles de la page de B aussi (texte ajouté…)."""
+        marks = list(self.marks.get(index, []))
+        partner = self.overlay_partner(index)
+        if partner is not None:
+            seen = {number for _, _, number in marks}
+            marks += [mark for mark in self.overlay.marks.get(partner, []) if mark[2] not in seen]
+        return marks
+
+    def page_pixmap(self, index):
+        if index in self.cache:
+            return self.cache[index]
+        if self.doc is None:
+            return None
+        ratio = self.devicePixelRatioF()
+        scale = self.zoom * ratio
+        try:
+            partner = self.overlay_partner(index)
+            if partner is not None:
+                pix = overlay_pixmap(self.doc[index], self.overlay.doc[partner], pymupdf.Matrix(scale, scale))
+            else:
+                pix = self.doc[index].get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
+        except Exception:
+            return None
+        pixmap = QPixmap.fromImage(to_qimage(pix))
+        pixmap.setDevicePixelRatio(ratio)
+        if len(self.cache) >= self.CACHE:
+            self.cache.pop(next(iter(self.cache)))
+        self.cache[index] = pixmap
+        return pixmap
+
+    def max_page_width(self):
+        return max((self.doc[i].rect.width for i in range(len(self.doc))), default=0) if self.doc else 0
+
+    def position(self):
+        """(page en haut de la zone visible, fraction de sa hauteur déjà passée)."""
+        if not self.widgets:
+            return 0, 0.0
+        top = self.verticalScrollBar().value()
+        low, high = 0, len(self.widgets) - 1
+        while low < high:  # pages de hauteur fixe, rangées dans l'ordre : recherche par dichotomie
+            middle = (low + high + 1) // 2
+            if self.widgets[middle].y() <= top:
+                low = middle
+            else:
+                high = middle - 1
+        widget = self.widgets[low]
+        return low, max(0.0, min(1.0, (top - widget.y()) / max(1, widget.height())))
+
+    def scroll_to(self, index, fraction):
+        if 0 <= index < len(self.widgets):
+            widget = self.widgets[index]
+            self.verticalScrollBar().setValue(round(widget.y() + fraction * widget.height()))
+
+    def show_rect(self, index, rect):
+        """Fait défiler jusqu'au rectangle (points) de la page, placé au tiers supérieur de la zone visible."""
+        if not 0 <= index < len(self.widgets):
+            return
+        widget = self.widgets[index]
+        y = widget.y() + COMPARE_HEADER + rect.y0 * self.zoom
+        self.verticalScrollBar().setValue(round(y - self.viewport().height() / 3))
+        x0, x1 = widget.x() + rect.x0 * self.zoom, widget.x() + rect.x1 * self.zoom
+        bar = self.horizontalScrollBar()
+        if x0 < bar.value() or x1 > bar.value() + self.viewport().width():
+            bar.setValue(round(x0 - 24))
+
+    def refresh(self):
+        for widget in self.widgets:
+            widget.update()
+
+
+class CompareDialog(QDialog):
+    """Comparer deux PDF : texte mot à mot, rendu des pages, pages ajoutées ou supprimées ; les deux versions
+    côte à côte avec défilement et zoom synchronisés, la liste des différences et l'export d'un rapport PDF.
+
+    current : (contenu PDF, nom) du document ouvert dans l'éditeur, proposé comme version A.
+    ask_password(doc, chemin) : demande le mot de passe d'un PDF protégé (None si l'utilisateur abandonne)."""
+
+    def __init__(self, current=None, ask_password=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Comparer deux PDF")
+        self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
+        self.ask_password = ask_password
+        self.docs = {"a": None, "b": None}
+        self.names = {"a": "", "b": ""}
+        self.paths = {"a": None, "b": None}
+        self.result = None
+        self.job = None
+        self.order = []  # numéros des différences, dans l'ordre de la liste
+        self._syncing = False
+        self.fitted = False
+        self.timer = QTimer(self)
+        self.timer.setInterval(0)
+        self.timer.timeout.connect(self._step)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+        layout.addLayout(self._files_row())
+        layout.addLayout(self._options_row())
+        layout.addWidget(self._progress_row())
+        self.notes_label = QLabel()
+        self.notes_label.setWordWrap(True)
+        self.notes_label.setStyleSheet("color: #b45309;")
+        self.notes_label.hide()
+        layout.addWidget(self.notes_label)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(self._differences_panel())
+        splitter.addWidget(self._views_panel())
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([340, 1000])
+        layout.addWidget(splitter, 1)
+
+        bottom = QHBoxLayout()
+        self.export_button = QPushButton(make_icon("save"), "Exporter le rapport PDF…")
+        self.export_button.setIconSize(QSize(18, 18))
+        self.export_button.setToolTip("Enregistrer un PDF : synthèse, liste des différences et pages annotées")
+        self.export_button.setAutoDefault(False)
+        self.export_button.clicked.connect(self.export_report)
+        self.export_button.setEnabled(False)
+        close_button = QPushButton("Fermer")
+        close_button.setAutoDefault(False)
+        close_button.clicked.connect(self.reject)
+        bottom.addWidget(self.export_button)
+        bottom.addStretch()
+        bottom.addWidget(close_button)
+        layout.addLayout(bottom)
+
+        for key, slot in (("F3", lambda: self.step_difference(1)), ("Shift+F3", lambda: self.step_difference(-1))):
+            action = QAction(self)
+            action.setShortcut(key)
+            action.triggered.connect(slot)
+            self.addAction(action)
+
+        screen = self.screen().availableGeometry()
+        self.resize(min(1500, screen.width() - 40), min(940, screen.height() - 60))
+        if current is not None:
+            data, name = current
+            self.set_document("a", pymupdf.open("pdf", data), f"{name} (document ouvert)", None)
+        self._update_buttons()
+
+    # --- Construction de la fenêtre ---------------------------------------------
+
+    def _files_row(self):
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(6)
+        self.file_edits = {}
+        self.browse_buttons = {}
+        for row, (side, label) in enumerate((("a", "Version A (ancienne) :"), ("b", "Version B (nouvelle) :"))):
+            edit = QLineEdit()
+            edit.setReadOnly(True)
+            edit.setPlaceholderText("Choisissez un PDF…")
+            button = QPushButton(make_icon("open"), "Parcourir…")
+            button.setIconSize(QSize(18, 18))
+            button.setAutoDefault(False)
+            button.clicked.connect(lambda _checked=False, s=side: self.browse(s))
+            grid.addWidget(QLabel(label), row, 0)
+            grid.addWidget(edit, row, 1)
+            grid.addWidget(button, row, 2)
+            self.file_edits[side] = edit
+            self.browse_buttons[side] = button
+        self.swap_button = QPushButton(make_icon("replace"), "Inverser")
+        self.swap_button.setIconSize(QSize(18, 18))
+        self.swap_button.setToolTip("Échanger les versions A et B")
+        self.swap_button.setAutoDefault(False)
+        self.swap_button.clicked.connect(self.swap)
+        grid.addWidget(self.swap_button, 0, 3, 2, 1)
+        grid.setColumnStretch(1, 1)
+        return grid
+
+    def _options_row(self):
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addWidget(QLabel("Réglage :"))
+        self.preset_combo = QComboBox()
+        for key, label, _ in COMPARE_PRESETS:
+            self.preset_combo.addItem(label, key)
+        self.preset_combo.setToolTip("Plan technique : tolérance de 5 %, rendu deux fois plus fin et zones plus "
+                                     "petites, pour les circuits imprimés et les dessins (un via et la piste voisine "
+                                     "restent deux différences). Un peu plus lent.")
+        self.preset_combo.currentIndexChanged.connect(self._preset_changed)
+        row.addWidget(self.preset_combo)
+        row.addSpacing(6)
+        row.addWidget(QLabel("Comparer :"))
+        self.mode_combo = QComboBox()
+        for key, label in COMPARE_MODES:
+            self.mode_combo.addItem(label, key)
+        self.mode_combo.setToolTip("Texte : mots ajoutés, supprimés ou modifiés. Visuel : images, dessins, mise en "
+                                   "page (et tout le contenu des PDF scannés).")
+        self.mode_combo.currentIndexChanged.connect(self._update_buttons)
+        row.addWidget(self.mode_combo)
+        self.case_box = QCheckBox("Ignorer la casse")
+        self.case_box.setToolTip("« Paris » et « PARIS » sont considérés comme identiques")
+        self.punctuation_box = QCheckBox("Ignorer la ponctuation et les espaces")
+        self.punctuation_box.setToolTip("Seuls les lettres et les chiffres des mots sont comparés. Les écarts "
+                                        "d'espacement entre les mots sont toujours ignorés.")
+        row.addWidget(self.case_box)
+        row.addWidget(self.punctuation_box)
+        row.addSpacing(10)
+        self.tolerance_label = QLabel("Tolérance visuelle :")
+        row.addWidget(self.tolerance_label)
+        self.tolerance_spin = QSpinBox()
+        self.tolerance_spin.setRange(0, 60)
+        self.tolerance_spin.setValue(10)
+        self.tolerance_spin.setSuffix(" %")
+        self.tolerance_spin.setToolTip("Écart de teinte toléré entre deux pixels avant de signaler une différence. "
+                                       "Augmentez-la pour des PDF scannés (grain, compression).")
+        row.addWidget(self.tolerance_spin)
+        row.addStretch()
+        self.compare_button = QPushButton(make_icon("compare"), "Comparer")
+        self.compare_button.setIconSize(QSize(18, 18))
+        self.compare_button.setDefault(True)
+        set_primary(self.compare_button)
+        self.compare_button.clicked.connect(self.start_comparison)
+        row.addWidget(self.compare_button)
+        return row
+
+    def _progress_row(self):
+        self.progress_widget = QWidget()
+        row = QHBoxLayout(self.progress_widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 1000)
+        self.progress.setTextVisible(False)
+        self.progress.setFixedHeight(10)
+        self.progress_label = QLabel()
+        self.progress_label.setObjectName("hint")
+        self.progress_label.setMinimumWidth(320)
+        cancel = QPushButton(make_icon("close"), "Annuler")
+        cancel.setIconSize(QSize(16, 16))
+        cancel.setAutoDefault(False)
+        cancel.clicked.connect(self.cancel_comparison)
+        row.addWidget(self.progress, 1)
+        row.addWidget(self.progress_label)
+        row.addWidget(cancel)
+        self.progress_widget.hide()
+        return self.progress_widget
+
+    def _differences_panel(self):
+        panel = QWidget()
+        column = QVBoxLayout(panel)
+        column.setContentsMargins(0, 0, 6, 0)
+        title = QLabel("Différences")
+        title.setStyleSheet("font-size: 11pt; font-weight: 600;")
+        column.addWidget(title)
+        self.summary_label = QLabel("Choisissez les deux versions, puis cliquez sur « Comparer ».")
+        self.summary_label.setObjectName("hint")
+        self.summary_label.setWordWrap(True)
+        self.summary_label.setTextFormat(Qt.TextFormat.RichText)
+        column.addWidget(self.summary_label)
+        self.list = QListWidget()
+        self.list.setWordWrap(True)
+        self.list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.list.currentItemChanged.connect(self._list_changed)
+        column.addWidget(self.list, 1)
+        navigation = QHBoxLayout()
+        self.previous_button = QPushButton(make_icon("previous"), "Précédente")
+        self.previous_button.setToolTip("Différence précédente (Maj+F3)")
+        self.previous_button.clicked.connect(lambda: self.step_difference(-1))
+        self.next_button = QPushButton(make_icon("next"), "Suivante")
+        self.next_button.setToolTip("Différence suivante (F3)")
+        self.next_button.clicked.connect(lambda: self.step_difference(1))
+        for button in (self.previous_button, self.next_button):
+            button.setIconSize(QSize(16, 16))
+            button.setAutoDefault(False)
+            navigation.addWidget(button)
+        column.addLayout(navigation)
+        panel.setMinimumWidth(260)
+        return panel
+
+    def _views_panel(self):
+        panel = QWidget()
+        column = QVBoxLayout(panel)
+        column.setContentsMargins(6, 0, 0, 0)
+        tools = QHBoxLayout()
+        for icon, tooltip, slot in (("zoom_out", "Zoom arrière (Ctrl + molette)", lambda: self.zoom_by(0.8)),
+                                    ("zoom_in", "Zoom avant (Ctrl + molette)", lambda: self.zoom_by(1.25))):
+            button = QPushButton(make_icon(icon), "")
+            button.setIconSize(QSize(18, 18))
+            button.setToolTip(tooltip)
+            button.setAutoDefault(False)
+            button.clicked.connect(slot)
+            tools.addWidget(button)
+            if icon == "zoom_out":
+                self.zoom_label = QLabel()
+                self.zoom_label.setObjectName("hint")
+                self.zoom_label.setMinimumWidth(48)
+                self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                tools.addWidget(self.zoom_label)
+        fit = QPushButton("Ajuster")
+        fit.setToolTip("Adapter le zoom à la largeur des pages")
+        fit.setAutoDefault(False)
+        fit.clicked.connect(self.fit_width)
+        tools.addWidget(fit)
+        tools.addSpacing(12)
+        tools.addWidget(QLabel("Affichage :"))
+        self.display_combo = QComboBox()
+        self.display_combo.addItem("Côte à côte", "side")
+        self.display_combo.addItem("Superposées", "overlay")
+        self.display_combo.setToolTip("Superposées : les deux versions en une seule page, ce qui n'est que dans A en "
+                                      "rouge, ce qui n'est que dans B en vert, ce qui est commun en noir. Idéal pour "
+                                      "les plans et les circuits imprimés.")
+        self.display_combo.currentIndexChanged.connect(self._display_changed)
+        tools.addWidget(self.display_combo)
+        tools.addSpacing(12)
+        self.sync_box = QCheckBox("Défilement synchronisé")
+        self.sync_box.setChecked(True)
+        self.sync_box.setToolTip("Les deux versions défilent ensemble, page appariée en face de page appariée")
+        tools.addWidget(self.sync_box)
+        tools.addStretch()
+        self.legend_side = "  ".join(
+            f"<span style='color:{COMPARE_KINDS[kind][0]}; font-size: 12pt;'>■</span> {COMPARE_KINDS[kind][1]}"
+            for kind in ("ajout", "suppression", "modification", "visuel"))
+        self.legend_overlay = ("<span style='color:#ff0000; font-size: 12pt;'>■</span> seulement dans A  "
+                               "<span style='color:#00c000; font-size: 12pt;'>■</span> seulement dans B  "
+                               "<span style='color:#000000; font-size: 12pt;'>■</span> identique")
+        self.legend = QLabel(self.legend_side)
+        self.legend.setObjectName("hint")
+        tools.addWidget(self.legend)
+        column.addLayout(tools)
+
+        views = QHBoxLayout()
+        views.setSpacing(8)
+        self.views, self.view_titles, self.view_boxes = {}, {}, {}
+        for side in ("a", "b"):
+            holder = QWidget()
+            box = QVBoxLayout(holder)
+            box.setContentsMargins(0, 0, 0, 0)
+            box.setSpacing(4)
+            title = QLabel()
+            title.setStyleSheet("font-weight: 600;")
+            title.setTextFormat(Qt.TextFormat.PlainText)
+            view = CompareView(side)
+            view.scrolled.connect(lambda s=side: self._view_scrolled(s))
+            view.wheel_zoom.connect(self.zoom_by)
+            box.addWidget(title)
+            box.addWidget(view, 1)
+            views.addWidget(holder, 1)
+            self.views[side], self.view_titles[side], self.view_boxes[side] = view, title, holder
+        column.addLayout(views, 1)
+        self.zoom = 1.0
+        self._update_zoom_label()
+        return panel
+
+    # --- Documents ----------------------------------------------------------------
+
+    def browse(self, side):
+        path, _ = QFileDialog.getOpenFileName(self, f"Choisir la version {side.upper()}", "", "Fichiers PDF (*.pdf)")
+        if path:
+            self.open_path(side, path)
+
+    def open_path(self, side, path):
+        """Ouvre un PDF comme version A ou B (mot de passe demandé s'il est protégé). Renvoie True si c'est fait."""
+        try:
+            doc = pymupdf.open(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Erreur", f"Impossible d'ouvrir le PDF :\n{path}\n\n{exc}")
+            return False
+        if not doc.is_pdf:
+            doc.close()
+            QMessageBox.critical(self, "Erreur", f"Ce fichier n'est pas un PDF :\n{path}")
+            return False
+        if doc.needs_pass:
+            password = self.ask_password(doc, path) if self.ask_password else None
+            if password is None:
+                doc.close()
+                return False
+            doc = unlock(doc, password)
+        self.set_document(side, doc, os.path.basename(path), path)
+        return True
+
+    def set_document(self, side, doc, name, path):
+        self.cancel_comparison()
+        if self.docs[side] is not None:
+            self.docs[side].close()
+        self.docs[side], self.names[side], self.paths[side] = doc, name, path
+        self.file_edits[side].setText(path or name)
+        self.file_edits[side].setToolTip(path or "Document ouvert dans l'éditeur, avec ses modifications")
+        self.views[side].zoom = self.zoom
+        self.views[side].set_document(doc)
+        self.views["a"].set_overlay(self.views["b"] if self.overlaid() else None)
+        self._clear_result()
+        self._update_titles()
+        self._update_buttons()
+
+    def swap(self):
+        self.cancel_comparison()
+        for store in (self.docs, self.names, self.paths):
+            store["a"], store["b"] = store["b"], store["a"]
+        for side in ("a", "b"):
+            self.file_edits[side].setText(self.paths[side] or self.names[side])
+            self.views[side].zoom = self.zoom
+            self.views[side].set_document(self.docs[side])
+        self.views["a"].set_overlay(self.views["b"] if self.overlaid() else None)
+        self._clear_result()
+        self._update_titles()
+        self._update_buttons()
+
+    def overlaid(self):
+        return self.display_combo.currentData() == "overlay"
+
+    def _display_changed(self):
+        """Côte à côte ou superposées. L'endroit regardé est gardé : même page, même hauteur dans la page et même
+        point en largeur (centre de la zone visible), et la version B est remise en face au retour au côte à côte."""
+        overlay = self.overlaid()
+        view_a = self.views["a"]
+        anchor = None
+        if view_a.doc is not None:
+            bar = view_a.horizontalScrollBar()
+            anchor = (*view_a.position(), (bar.value() + view_a.viewport().width() / 2) / max(1, view_a.widget().width()))
+        self.view_boxes["b"].setVisible(not overlay)
+        self.sync_box.setEnabled(not overlay)
+        self.legend.setText(self.legend_overlay if overlay else self.legend_side)
+        view_a.set_overlay(self.views["b"] if overlay else None)
+        self._update_titles()
+        if anchor is not None:
+            # Après la nouvelle mise en page (largeur des vues changée), pas avant.
+            QTimer.singleShot(0, lambda: self._restore_position(anchor))
+
+    def _restore_position(self, anchor):
+        index, fraction, center = anchor
+        view_a, view_b = self.views["a"], self.views["b"]
+        self._syncing = True
+        try:
+            view_a.scroll_to(index, fraction)
+            bar = view_a.horizontalScrollBar()
+            bar.setValue(round(center * view_a.widget().width() - view_a.viewport().width() / 2))
+            if not self.overlaid() and view_b.doc is not None:
+                partner = self._partner_page("a", index)
+                if partner is not None:
+                    view_b.scroll_to(partner, fraction)
+                other = view_b.horizontalScrollBar()
+                other.setValue(round(center * view_b.widget().width() - view_b.viewport().width() / 2))
+        finally:
+            self._syncing = False
+
+    def _update_titles(self):
+        for side in ("a", "b"):
+            doc = self.docs[side]
+            text = f"Version {side.upper()}"
+            if doc is not None:
+                text += f" — {self.names[side]} ({len(doc)} page{'s' if len(doc) > 1 else ''})"
+            if side == "a" and self.overlaid() and self.docs["b"] is not None:
+                text = f"Superposition : A — {self.names['a']}  et  B — {self.names['b']}"
+            self.view_titles[side].setText(text)
+            self.view_titles[side].setToolTip(self.paths[side] or "")
+        if not self.fitted and all(doc is not None for doc in self.docs.values()):
+            self.fitted = True  # zoom adapté une fois, à l'arrivée des deux versions ; ensuite celui de l'utilisateur
+            QTimer.singleShot(0, self.fit_width)
+
+    def _update_buttons(self):
+        running = self.job is not None
+        ready = all(doc is not None for doc in self.docs.values())
+        self.compare_button.setEnabled(ready and not running)
+        for button in (*self.browse_buttons.values(), self.swap_button):
+            button.setEnabled(not running)
+        visual = self.mode_combo.currentData() != "text"
+        self.tolerance_spin.setEnabled(visual)
+        self.tolerance_label.setEnabled(visual)
+        has_result = self.result is not None and not running
+        self.export_button.setEnabled(has_result)
+        navigable = has_result and bool(self.order)
+        self.previous_button.setEnabled(navigable)
+        self.next_button.setEnabled(navigable)
+
+    # --- Calcul -------------------------------------------------------------------
+
+    def _preset_changed(self):
+        tolerance = {key: value for key, _, value in COMPARE_PRESETS}[self.preset_combo.currentData()]
+        self.tolerance_spin.setValue(tolerance)
+
+    def options(self):
+        return {"mode": self.mode_combo.currentData(), "ignore_case": self.case_box.isChecked(),
+                "ignore_punctuation": self.punctuation_box.isChecked(),
+                "tolerance": self.tolerance_spin.value() / 100, "preset": self.preset_combo.currentData()}
+
+    def start_comparison(self):
+        if not all(doc is not None for doc in self.docs.values()) or self.job is not None:
+            return
+        self._clear_result()
+        self.job = compare_documents(self.docs["a"], self.docs["b"], self.options())
+        self.progress.setValue(0)
+        self.progress_label.setText("Comparaison en cours…")
+        self.progress_widget.show()
+        self.summary_label.setText("Comparaison en cours…")
+        self._update_buttons()
+        self.timer.start()
+
+    def _step(self):
+        """Avance la comparaison pendant COMPARE_TICK secondes, puis rend la main à l'interface."""
+        deadline = time.perf_counter() + COMPARE_TICK
+        fraction, message = None, None
+        try:
+            while time.perf_counter() < deadline:
+                fraction, message = next(self.job)
+        except StopIteration as stop:
+            self.timer.stop()
+            self.job = None
+            self.progress_widget.hide()
+            self.show_result(stop.value)
+            return
+        except Exception as exc:
+            self.timer.stop()
+            self.job = None
+            self.progress_widget.hide()
+            self.summary_label.setText("La comparaison a échoué.")
+            self._update_buttons()
+            QMessageBox.critical(self, "Erreur", f"La comparaison a échoué.\n\n{exc}")
+            return
+        if fraction is not None:
+            self.progress.setValue(round(fraction * 1000))
+            self.progress_label.setText(message)
+
+    def cancel_comparison(self):
+        if self.job is None:
+            return
+        self.timer.stop()
+        self.job.close()
+        self.job = None
+        self.progress_widget.hide()
+        self.summary_label.setText("Comparaison annulée.")
+        self._update_buttons()
+
+    def _clear_result(self):
+        self.result = None
+        self.order = []
+        self.list.clear()
+        self.notes_label.hide()
+        for view in self.views.values():
+            view.marks, view.page_states, view.partners, view.selected = {}, {}, {}, None
+            view.names = {}
+            view.cache = {}  # superposition : les pages appariées peuvent changer
+            view.refresh()
+        self.summary_label.setText("Choisissez les deux versions, puis cliquez sur « Comparer »."
+                                   if not all(doc is not None for doc in self.docs.values()) else "Cliquez sur « Comparer ».")
+        self._update_buttons()
+
+    def show_result(self, result):
+        """Affiche les différences : surlignage des deux versions, liste groupée par page et résumé."""
+        self.result = result
+        items, pairs = result["items"], result["pairs"]
+        names = result.get("names")
+        for side in ("a", "b"):
+            view = self.views[side]
+            view.marks, view.page_states, view.partners = {}, {}, {}
+            view.names = dict(enumerate(names[0 if side == "a" else 1])) if names else {}
+            view.cache = {}
+            for a, b in pairs:
+                if a is not None and b is not None:
+                    view.partners[a if side == "a" else b] = b if side == "a" else a
+        for number, item in enumerate(items):
+            for side in ("a", "b"):
+                for page, rect in item["marks_" + side]:
+                    self.views[side].marks.setdefault(page, []).append((rect, item["kind"], number))
+                    if item.get("page_level") and item["kind"] != "mise_en_page":
+                        self.views[side].page_states[page] = item["kind"]
+
+        self.list.clear()
+        self.order = []
+        by_pair = {}
+        for number, item in enumerate(items):
+            by_pair.setdefault(item["pair"], []).append(number)
+        for k in sorted(by_pair):
+            numbers = by_pair[k]
+            header = QListWidgetItem(f"{pair_title(pairs[k], names)}\n"
+                                     f"{compare_summary_text([items[n] for n in numbers])}")
+            header.setFlags(Qt.ItemFlag.NoItemFlags)
+            font = header.font()
+            font.setBold(True)
+            header.setFont(font)
+            header.setForeground(QColor("#1e293b"))
+            header.setBackground(QColor("#f1f5f9"))
+            self.list.addItem(header)
+            for number in numbers:
+                item = items[number]
+                color, label, _ = COMPARE_KINDS[item["kind"]]
+                entry = QListWidgetItem(self._swatch(color), f"{label} : {compare_description(item)}")
+                pages = " · ".join(f"page {page + 1} de {side}" for side, page
+                                   in (("A", item["page_a"]), ("B", item["page_b"])) if page is not None)
+                entry.setToolTip(f"Différence n° {number + 1} — {pages}")
+                entry.setData(Qt.ItemDataRole.UserRole, number)
+                self.list.addItem(entry)
+                self.order.append(number)
+
+        if items:
+            parts = [f"<span style='color:{COMPARE_KINDS[kind][0]};'>■</span>&nbsp;{count}&nbsp;"
+                     f"{html.escape(COMPARE_KINDS[kind][2] if count > 1 else COMPARE_KINDS[kind][1].lower())}"
+                     for kind, count in compare_counts(items).items()]
+            self.summary_label.setText(f"<b style='color:#1e293b;'>{len(items)} différence{'s' if len(items) > 1 else ''}"
+                                       f"</b> sur {len(by_pair)} page{'s' if len(by_pair) > 1 else ''} :<br>"
+                                       + " · ".join(parts))
+        else:
+            self.summary_label.setText("<b style='color:#16a34a;'>Aucune différence</b> : les deux versions sont "
+                                       "identiques selon les options choisies.")
+        self.notes_label.setText("\n".join(result["notes"]))
+        self.notes_label.setVisible(bool(result["notes"]))
+        for view in self.views.values():
+            view.refresh()
+        self._update_buttons()
+        if self.order:
+            self.select(self.order[0])
+
+    @staticmethod
+    def _swatch(color):
+        pixmap = QPixmap(14, 14)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(color))
+        painter.drawRoundedRect(QRectF(1, 1, 12, 12), 3, 3)
+        painter.end()
+        return QIcon(pixmap)
+
+    # --- Navigation ---------------------------------------------------------------
+
+    def _list_changed(self, current, _previous):
+        if (self.result is not None and current is not None
+                and current.data(Qt.ItemDataRole.UserRole) is not None):
+            self.select(current.data(Qt.ItemDataRole.UserRole))
+
+    def step_difference(self, step):
+        if not self.order:
+            return
+        current = self.views["a"].selected
+        position = self.order.index(current) + step if current in self.order else (0 if step > 0 else -1)
+        self.select(self.order[position % len(self.order)])
+
+    def select(self, number):
+        """Met en avant une différence et la montre dans les deux versions."""
+        item = self.result["items"][number]
+        for side in ("a", "b"):
+            self.views[side].selected = number
+            self.views[side].refresh()
+        for row in range(self.list.count()):
+            if self.list.item(row).data(Qt.ItemDataRole.UserRole) == number:
+                if self.list.currentRow() != row:
+                    self.list.blockSignals(True)
+                    self.list.setCurrentRow(row)
+                    self.list.blockSignals(False)
+                self.list.scrollToItem(self.list.item(row))
+                break
+        self._syncing = True
+        try:
+            for side, other in (("a", "b"), ("b", "a")):
+                marks = item["marks_" + side]
+                if marks:
+                    self.views[side].show_rect(*marks[0])
+                elif item["marks_" + other]:
+                    # Rien de ce côté (texte ajouté, page supprimée…) : même endroit de la page appariée.
+                    page, rect = item["marks_" + other][0]
+                    partner = self._partner_page(other, page)
+                    if partner is not None:
+                        self.views[side].show_rect(partner, rect)
+        finally:
+            self._syncing = False
+
+    def _partner_page(self, side, index):
+        """Page de l'autre version en face de la page index (la plus proche appariée si elle n'a pas d'équivalent)."""
+        other = "b" if side == "a" else "a"
+        count = len(self.docs[other]) if self.docs[other] is not None else 0
+        if not count:
+            return None
+        if self.result is None:
+            return min(index, count - 1)
+        partners = self.views[side].partners
+        if index in partners:
+            return partners[index]
+        for distance in range(1, len(self.docs[side]) + 1):
+            for candidate in (index - distance, index + distance):
+                if candidate in partners:
+                    return partners[candidate]
+        return min(index, count - 1)
+
+    def _view_scrolled(self, side):
+        if self._syncing or not self.sync_box.isChecked():
+            return
+        other = "b" if side == "a" else "a"
+        source, target = self.views[side], self.views[other]
+        if source.doc is None or target.doc is None:
+            return
+        self._syncing = True
+        try:
+            index, fraction = source.position()
+            partner = self._partner_page(side, index)
+            if partner is not None:
+                target.scroll_to(partner, fraction)
+            bar, other_bar = source.horizontalScrollBar(), target.horizontalScrollBar()
+            if bar.maximum() > 0 and other_bar.maximum() > 0:
+                other_bar.setValue(round(bar.value() / bar.maximum() * other_bar.maximum()))
+        finally:
+            self._syncing = False
+
+    # --- Zoom ---------------------------------------------------------------------
+
+    def set_zoom(self, zoom):
+        zoom = max(0.2, min(5.0, zoom))
+        anchor = self.views["a"].position() if self.docs["a"] is not None else None
+        self.zoom = zoom
+        self._syncing = True
+        try:
+            for view in self.views.values():
+                if view.doc is not None:
+                    view.set_zoom(zoom)
+            if anchor is not None:
+                self.views["a"].scroll_to(*anchor)
+        finally:
+            self._syncing = False
+        if anchor is not None:
+            self._view_scrolled("a")
+        self._update_zoom_label()
+
+    def zoom_by(self, factor):
+        self.set_zoom(self.zoom * factor)
+
+    def fit_width(self):
+        shown = [view for side, view in self.views.items() if not (side == "b" and self.overlaid())]
+        widths = [view.max_page_width() for view in shown if view.doc is not None]
+        if not widths:
+            return
+        available = min(view.viewport().width() for view in shown) - 40
+        self.set_zoom(max(0.2, available / max(widths)))
+
+    def _update_zoom_label(self):
+        # Rendu à 72 points par pouce × zoom, sur un écran à 96 pixels par pouce.
+        self.zoom_label.setText(f"{round(self.zoom * 72 / 96 * 100)} %")
+
+    # --- Rapport ------------------------------------------------------------------
+
+    def export_report(self):
+        if self.result is None:
+            return
+        stem_a = os.path.splitext(self.names["a"].replace(" (document ouvert)", ""))[0]
+        stem_b = os.path.splitext(self.names["b"].replace(" (document ouvert)", ""))[0]
+        folder = os.path.dirname(self.paths["b"] or self.paths["a"] or "")
+        suggested = os.path.join(folder, f"Comparaison {stem_a} - {stem_b}.pdf")
+        path, _ = QFileDialog.getSaveFileName(self, "Exporter le rapport de comparaison", suggested,
+                                              "Fichiers PDF (*.pdf)")
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        if any(p and os.path.normcase(os.path.abspath(p)) == os.path.normcase(os.path.abspath(path))
+               for p in self.paths.values()):
+            QMessageBox.warning(self, "Exporter le rapport", "Choisissez un autre nom : ce fichier est l'une des "
+                                "deux versions comparées.")
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            report = comparison_report(self.result, self.docs["a"], self.docs["b"], self.names["a"], self.names["b"])
+            report.save(path, garbage=3, deflate=True)
+            report.close()
+        except Exception as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, "Erreur", f"Impossible d'enregistrer le rapport :\n{path}\n\n{exc}")
+            return
+        QApplication.restoreOverrideCursor()
+        box = QMessageBox(QMessageBox.Icon.Information, "Rapport enregistré",
+                          f"Le rapport de comparaison a été enregistré :\n{path}",
+                          QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Close, self)
+        box.button(QMessageBox.StandardButton.Open).setText("Ouvrir le rapport")
+        box.button(QMessageBox.StandardButton.Close).setText("Fermer")
+        box.exec()
+        if box.standardButton(box.clickedButton()) == QMessageBox.StandardButton.Open:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    # --- Fermeture ----------------------------------------------------------------
+
+    def done(self, result):
+        self.cancel_comparison()
+        for side in ("a", "b"):
+            self.views[side].set_document(None)
+            if self.docs[side] is not None:
+                self.docs[side].close()
+                self.docs[side] = None
+        super().done(result)
+
+
 def make_icon_label(glyph):
     """Petit symbole affiché devant un champ de saisie."""
     return f'<span style="font-family: \'Segoe UI Symbol\'; font-size: 13pt; color: {SLATE};">{glyph}</span>'
@@ -1944,13 +5237,22 @@ FEATURES = [
      "Agrandissez ou réduisez l'affichage des pages, et allez directement à une page donnée "
      "(ou cliquez sur « Page 3 / 12 » en bas à droite).",
      "Ctrl++ · Ctrl+- · Ctrl+G"),
+    ("id_photo", "Photos d'identité",
+     "Sélectionnez la zone d'une photo, zoomez, tronquez, redressez, puis obtenez un PDF de photos au bon format, "
+     "disposées selon le papier de votre imprimante et imprimées à leur taille exacte. "
+     "Une planche enregistrée reste modifiable.",
+     "Ctrl+Maj+P · Ctrl+Maj+M"),
+    ("compare", "Comparer deux PDF",
+     "Voyez côte à côte ce qui a changé entre deux versions d'un document : mots ajoutés, supprimés ou modifiés, "
+     "images, pages en plus ou en moins. Exportez un rapport PDF des différences.",
+     "Ctrl+Maj+C"),
 ]
 
 
 class WelcomeWidget(QWidget):
     """Écran d'accueil affiché tant qu'aucun document n'est ouvert."""
 
-    def __init__(self, open_callback, merge_callback, parent=None):
+    def __init__(self, open_callback, merge_callback, id_photo_callback, parent=None):
         super().__init__(parent)
 
         # Bandeau d'en-tête : titre, accroche et actions principales.
@@ -1969,14 +5271,17 @@ class WelcomeWidget(QWidget):
         )
         merge_button = QPushButton(make_icon("merge"), "Concaténer des PDF…")
         merge_button.clicked.connect(merge_callback)
-        merge_button.setStyleSheet(
-            "QPushButton { background: rgba(255,255,255,0.15); color: white;"
-            " border: 1px solid rgba(255,255,255,0.6); font-weight: 600; }"
-            "QPushButton:hover { background: rgba(255,255,255,0.28); }"
-        )
+        id_photo_button = QPushButton(make_icon("id_photo"), "Photos d'identité…")
+        id_photo_button.clicked.connect(id_photo_callback)
+        for button in (merge_button, id_photo_button):
+            button.setStyleSheet(
+                "QPushButton { background: rgba(255,255,255,0.15); color: white;"
+                " border: 1px solid rgba(255,255,255,0.6); font-weight: 600; }"
+                "QPushButton:hover { background: rgba(255,255,255,0.28); }"
+            )
         buttons = QHBoxLayout()
         buttons.setSpacing(10)
-        for button in (open_button, merge_button):
+        for button in (open_button, merge_button, id_photo_button):
             button.setIconSize(QSize(20, 20))
             button.setMinimumHeight(42)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2109,7 +5414,7 @@ class PdfEditor(QMainWindow):
         self.wheel_timer.timeout.connect(self._apply_wheel_zoom)
 
         # Accueil tant qu'aucun document n'est ouvert, puis affichage des pages.
-        self.welcome = WelcomeWidget(self.open_dialog, self.merge_dialog)
+        self.welcome = WelcomeWidget(self.open_dialog, self.merge_dialog, self.id_photo_dialog)
         self.stack = QStackedWidget()
         self.stack.addWidget(self.welcome)
         self.stack.addWidget(self.scroll)
@@ -2158,6 +5463,21 @@ class PdfEditor(QMainWindow):
         self.merge_action.setShortcut("Ctrl+M")
         self.merge_action.triggered.connect(self.merge_dialog)
         file_menu.addAction(self.merge_action)
+
+        self.id_photo_action = QAction(make_icon("id_photo"), "Photos d'i&dentité…", self)
+        self.id_photo_action.setShortcut("Ctrl+Shift+P")
+        self.id_photo_action.triggered.connect(self.id_photo_dialog)
+        file_menu.addAction(self.id_photo_action)
+
+        self.modify_sheet_action = QAction(make_icon("crop"), "Modifier la planche de p&hotos…", self)
+        self.modify_sheet_action.setShortcut("Ctrl+Shift+M")
+        self.modify_sheet_action.triggered.connect(self.modify_id_photo_sheet)
+        file_menu.addAction(self.modify_sheet_action)
+
+        self.compare_action = QAction(make_icon("compare"), "Co&mparer deux PDF…", self)
+        self.compare_action.setShortcut("Ctrl+Shift+C")
+        self.compare_action.triggered.connect(self.compare_dialog)
+        file_menu.addAction(self.compare_action)
 
         file_menu.addSeparator()
 
@@ -2287,7 +5607,8 @@ class PdfEditor(QMainWindow):
             f"<h2 style='color:{ACCENT}; margin-bottom:0;'>{APP_NAME}</h2>"
             f"<p style='margin-top:4px;'><b>Version {APP_VERSION}</b> — {APP_DATE}</p>"
             "<p>Éditeur de PDF : modification du texte, concaténation, organisation, rotation "
-            "et suppression des pages, recherche et remplacement, annulation et rétablissement, impression.</p>"
+            "et suppression des pages, recherche et remplacement, annulation et rétablissement, impression, "
+            "photos d'identité, comparaison de deux PDF.</p>"
             f"<p>Application écrite par <b>{APP_AUTHOR}</b><br>"
             f"<span style='color:{SLATE};'>Modèle : {APP_AUTHOR_MODEL}</span><br>"
             f"sous le commandement de <b>{APP_DIRECTOR}</b>.</p>",
@@ -2302,8 +5623,10 @@ class PdfEditor(QMainWindow):
         self.addToolBar(toolbar)
 
         groups = [
-            [(self.open_action, "Ouvrir"), (self.merge_action, "Concaténer"), (self.save_action, "Enregistrer"),
-             (self.print_action, "Imprimer"), (self.close_action, "Fermer")],
+            [(self.open_action, "Ouvrir"), (self.merge_action, "Concaténer"), (self.id_photo_action, "Identité"),
+             (self.modify_sheet_action, "Modifier planche"),  # visible seulement sur une planche
+             (self.compare_action, "Comparer"),
+             (self.save_action, "Enregistrer"), (self.print_action, "Imprimer"), (self.close_action, "Fermer")],
             [(self.undo_action, "Annuler"), (self.redo_action, "Rétablir")],
             [(self.edit_action, "Éditer le texte"), (self.reorder_action, "Pages"),
              (self.find_action, "Rechercher"), (self.replace_action, "Remplacer")],
@@ -2343,6 +5666,7 @@ class PdfEditor(QMainWindow):
         self.print_action.setEnabled(has_doc)
         self.edit_action.setEnabled(has_doc)
         self.reorder_action.setEnabled(has_doc)
+        self.modify_sheet_action.setVisible(has_doc and is_id_photo_sheet(self.doc))
         for action in (self.find_action, self.replace_action, self.find_next_action, self.find_previous_action,
                        self.zoom_in_action, self.zoom_out_action, self.goto_action,
                        self.insert_image_action, self.insert_signature_action):
@@ -3011,6 +6335,12 @@ class PdfEditor(QMainWindow):
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
         printer.setDocName(os.path.basename(self.path) if self.path else "Sans titre")
         first = self.doc[0].rect
+        actual_size = prints_actual_size(self.doc)
+        if actual_size and not self._explain_actual_size():
+            return
+        if actual_size:  # feuille de photos d'identité : le papier du PDF est proposé d'emblée
+            printer.setPageSize(QPageSize(QSizeF(min(first.width, first.height), max(first.width, first.height)),
+                                          QPageSize.Unit.Point))
         printer.setPageOrientation(
             QPageLayout.Orientation.Landscape if first.width > first.height else QPageLayout.Orientation.Portrait
         )
@@ -3023,14 +6353,68 @@ class PdfEditor(QMainWindow):
             indices = range(printer.fromPage() - 1, min(printer.toPage(), len(self.doc)))
         else:
             indices = range(len(self.doc))
-        if self.print_pages(printer, indices):
-            self.statusBar().showMessage(f"{len(indices)} page(s) envoyée(s) à l'imprimante.", 5000)
+        if actual_size:
+            if not self._photos_fit(printer, self.doc[indices[0]]):
+                return
+            # Aucune marge ajoutée à l'impression. Après le contrôle : en pleine page, pageRect() ne donne plus la zone
+            # que l'imprimante peut atteindre.
+            printer.setFullPage(True)
+        if self.print_pages(printer, indices, actual_size):
+            scale = " à la taille réelle" if actual_size else ""
+            self.statusBar().showMessage(f"{len(indices)} page(s) envoyée(s) à l'imprimante{scale}.", 5000)
 
-    def print_pages(self, printer, indices):
+    def _explain_actual_size(self):
+        """Précise, avant d'imprimer une feuille de photos, comment garder leur taille exacte. False : abandon."""
+        box = QMessageBox(
+            QMessageBox.Icon.Information,
+            "Imprimer les photos d'identité",
+            "Les photos seront imprimées à leur taille exacte : aucune marge ajoutée à l'impression, aucune mise à "
+            "l'échelle.",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            self,
+        )
+        box.setInformativeText(
+            "Dans les propriétés de l'imprimante, choisissez le papier de cette feuille et désactivez tout "
+            "agrandissement ou réduction.\n\n"
+            "Laissez l'option « Sans marges » (« Borderless ») décochée : elle agrandit l'image et les photos sortiraient "
+            "trop grandes. Attention, les préréglages « Photo » de certaines imprimantes la cochent d'eux-mêmes."
+        )
+        box.button(QMessageBox.StandardButton.Ok).setText("Continuer")
+        box.button(QMessageBox.StandardButton.Cancel).setText("Annuler")
+        set_primary(box.button(QMessageBox.StandardButton.Ok))
+        box.setDefaultButton(QMessageBox.StandardButton.Ok)
+        box.exec()
+        return box.standardButton(box.clickedButton()) == QMessageBox.StandardButton.Ok
+
+    def _photos_fit(self, printer, page):
+        """Les photos d'une page imprimée en taille réelle seront-elles entières ? Sinon, demande quoi faire."""
+        paper = printer.paperRect(QPrinter.Unit.Point)
+        if not photos_outside_printable(page, paper, printer.pageRect(QPrinter.Unit.Point)):
+            return True
+        box = QMessageBox(
+            QMessageBox.Icon.Warning,
+            "Photos coupées à l'impression",
+            f"Le papier choisi dans l'imprimante mesure {mm_text(round(paper.width() / POINTS_PER_MM))} × "
+            f"{mm_text(round(paper.height() / POINTS_PER_MM))} mm : à leur taille réelle, des photos sortiraient de la "
+            "zone qu'elle peut imprimer et seraient coupées.\n\n"
+            "Choisissez un papier plus grand, ou refaites la feuille avec une marge plus grande. Imprimer quand même ?",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            self,
+        )
+        box.button(QMessageBox.StandardButton.Ok).setText("Imprimer quand même")
+        box.button(QMessageBox.StandardButton.Cancel).setText("Annuler")
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        return box.standardButton(box.clickedButton()) == QMessageBox.StandardButton.Ok
+
+    def print_pages(self, printer, indices, actual_size=False):
         """Imprime les pages : chacune ajustée à la feuille sans déformation, centrée.
 
         Une page paysage sur une feuille portrait (ou l'inverse) est tournée d'un quart de tour
         pour occuper toute la feuille.
+
+        actual_size : les pages gardent leur taille exacte et sont centrées sur le papier (photos d'identité) ;
+        elles ne sont tournées que si elles ne tiennent pas autrement.
         """
         painter = QPainter()
         if not painter.begin(printer):
@@ -3038,7 +6422,10 @@ class PdfEditor(QMainWindow):
             return False
         dpi = min(printer.resolution(), PRINT_DPI)
         area = printer.pageRect(QPrinter.Unit.DevicePixel)
+        printable_left, printable_top = area.x(), area.y()  # position de la zone imprimable sur le papier
         area = QRectF(0, 0, area.width(), area.height())  # zone imprimable, origine du peintre
+        paper = printer.paperRect(QPrinter.Unit.DevicePixel)
+        device_per_point = printer.resolution() / 72
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             for n, index in enumerate(indices):
@@ -3048,11 +6435,20 @@ class PdfEditor(QMainWindow):
                 QApplication.processEvents()
                 pix = self.doc[index].get_pixmap(dpi=dpi, alpha=False)
                 image = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888).copy()
-                if (image.width() > image.height()) != (area.width() > area.height()):
-                    image = image.transformed(QTransform().rotate(90))
-                scale = min(area.width() / image.width(), area.height() / image.height())
-                w, h = image.width() * scale, image.height() * scale
-                target = QRectF(area.x() + (area.width() - w) / 2, area.y() + (area.height() - h) / 2, w, h)
+                if actual_size:
+                    rect = self.doc[index].rect
+                    w, h = rect.width * device_per_point, rect.height * device_per_point
+                    if quarter_turn_needed(w, h, paper.width(), paper.height(), 2 * device_per_point):
+                        image = image.transformed(QTransform().rotate(90))
+                        w, h = h, w
+                    target = QRectF((paper.width() - w) / 2 - printable_left,
+                                    (paper.height() - h) / 2 - printable_top, w, h)
+                else:
+                    if (image.width() > image.height()) != (area.width() > area.height()):
+                        image = image.transformed(QTransform().rotate(90))
+                    scale = min(area.width() / image.width(), area.height() / image.height())
+                    w, h = image.width() * scale, image.height() * scale
+                    target = QRectF(area.x() + (area.width() - w) / 2, area.y() + (area.height() - h) / 2, w, h)
                 painter.drawImage(target, image)
         finally:
             painter.end()
@@ -3122,6 +6518,9 @@ class PdfEditor(QMainWindow):
         if doc.is_form_pdf:
             self.statusBar().showMessage("Ce document contient un formulaire : cliquez sur un champ pour le remplir.",
                                          10000)
+        elif self.modify_sheet_action.isVisible():
+            self.statusBar().showMessage("Planche de photos d'identité : « Modifier la planche » (Ctrl+Maj+M) pour "
+                                         "changer le recadrage, le format ou la disposition.", 10000)
 
     def close_document(self):
         """Ferme le PDF en cours (après avoir proposé d'enregistrer) et revient à l'écran d'accueil."""
@@ -3229,6 +6628,110 @@ class PdfEditor(QMainWindow):
             "Ctrl+R pour organiser les pages. Pensez à enregistrer.",
             8000,
         )
+
+    def id_photo_dialog(self):
+        """Prépare une photo d'identité et ouvre la feuille de photos générée comme un nouveau document."""
+        path, _ = QFileDialog.getOpenFileName(self, "Choisir une photo", "", ID_PHOTO_FILTER)
+        if not path:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            image = load_photo(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Erreur", f"Impossible de lire l'image :\n{path}\n\n{exc}\n\n"
+                                 "Les photos HEIC ou WebP doivent d'abord être enregistrées en JPEG ou en PNG.")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        dialog = IdPhotoDialog(image, os.path.basename(path), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            sheet = dialog.sheet()
+        except Exception as exc:
+            QMessageBox.critical(self, "Erreur", f"La génération du PDF a échoué.\n\n{exc}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if not self.maybe_save():
+            sheet.close()
+            return
+        if self.doc is not None:
+            self.push_undo("photos d'identité")
+            self.doc.close()
+        self.doc = sheet
+        self.path = None
+        self.password = None  # nouveau document : non protégé
+        self._set_modified(True)
+        self._update_actions()
+        self.render_all()
+        self.statusBar().showMessage(
+            f"Feuille de {len(dialog.positions)} photo(s) générée. Ctrl+P pour l'imprimer à la taille réelle, "
+            "Ctrl+S pour l'enregistrer.",
+            10000,
+        )
+
+    def modify_id_photo_sheet(self):
+        """Rouvre la planche ouverte dans la fenêtre des photos d'identité, et la remplace par le résultat.
+
+        L'opération s'annule (Ctrl+Z) ; le document garde son fichier et son mot de passe."""
+        if self.doc is None or not is_id_photo_sheet(self.doc):
+            return
+        if len(self.doc) > 1:
+            box = QMessageBox(
+                QMessageBox.Icon.Warning,
+                "Modifier la planche",
+                f"Ce document a {len(self.doc)} pages. La planche mise à jour le remplacera entièrement : les autres "
+                "pages seront retirées (Ctrl+Z pour les retrouver).",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                self,
+            )
+            box.button(QMessageBox.StandardButton.Ok).setText("Continuer")
+            box.button(QMessageBox.StandardButton.Cancel).setText("Annuler")
+            box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+            box.exec()
+            if box.standardButton(box.clickedButton()) != QMessageBox.StandardButton.Ok:
+                return
+        name = os.path.basename(self.path) if self.path else "Sans titre"
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            image, settings, complete = read_id_photo_sheet(self.doc)
+            dialog = IdPhotoDialog(image, name, self, settings=settings, limited=not complete)
+        except Exception as exc:
+            QMessageBox.critical(self, "Erreur", f"Impossible de relire cette planche.\n\n{exc}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            sheet = dialog.sheet()
+        except Exception as exc:
+            QMessageBox.critical(self, "Erreur", f"La génération du PDF a échoué.\n\n{exc}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.push_undo("modification de la planche")
+        self.doc.close()
+        self.doc = sheet
+        self._set_modified(True)
+        self._update_actions()
+        self.render_all()
+        self.statusBar().showMessage(
+            f"Planche mise à jour : {len(dialog.positions)} photo(s). Ctrl+Z pour annuler, Ctrl+S pour enregistrer.",
+            10000,
+        )
+
+    def compare_dialog(self):
+        """Compare deux PDF ; le document ouvert, avec ses modifications, est proposé comme version A."""
+        current = None
+        if self.doc is not None:
+            current = (self.doc.tobytes(), os.path.basename(self.path) if self.path else "Sans titre")
+        dialog = CompareDialog(current, self.ask_password, self)
+        dialog.exec()
 
     def _open_sources(self, paths):
         """Ouvre les PDF à ajouter au document (mot de passe demandé si besoin).

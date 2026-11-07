@@ -19,9 +19,10 @@ EXCLUDED_MODULES = [
     "ssl", "_ssl", "_hashlib",  # hashlib se rabat sur ses implémentations intégrées
     "numpy", "PIL",
     # Jamais chargés par l'application ni par PyMuPDF (bz2, lzma, zstd et decimal, eux, le sont).
+    # difflib, lui, est nécessaire : il sert à la comparaison de deux PDF.
     "email", "http", "urllib", "xml", "html.parser", "multiprocessing", "asyncio", "concurrent",
     "socket", "_socket", "select", "selectors", "gzip", "json", "csv", "pickle", "subprocess",
-    "difflib", "unicodedata", "ctypes", "_ctypes",
+    "unicodedata", "ctypes", "_ctypes",
     "PySide6.QtNetwork", "PySide6.QtQml", "PySide6.QtQuick", "PySide6.QtOpenGL",
     "PySide6.QtPdf", "PySide6.QtSvg", "PySide6.QtDBus",
 ]
