@@ -904,6 +904,7 @@ class PageWidget(QWidget):
     placement_cancelled = Signal(int)
     rotate_requested = Signal(int, int)
     delete_requested = Signal(int)
+    ocr_text_clicked = Signal(int)  # page : clic, en mode édition, sur un texte invisible (calque OCR)
 
     HANDLE = 10  # côté des poignées de redimensionnement, en pixels
     MIN_IMAGE_SIZE = 12  # en points
@@ -1122,10 +1123,14 @@ class PageWidget(QWidget):
             painter.setPen(QPen(QColor(ACCENT), 2))
             painter.drawRect(self.to_widget(self.hovered_field["view"]))
         if self.edit_mode:
-            painter.setPen(QPen(QColor(0, 120, 215, 90), 1))
+            editable = QPen(QColor(0, 120, 215, 90), 1)
+            recognized = QPen(QColor(100, 116, 139, 120), 1, Qt.PenStyle.DashLine)  # calque OCR : non modifiable
             for span in self.spans:
+                painter.setPen(recognized if span.get("ocr") else editable)
                 painter.drawRect(self._span_rect(span))
-            if self.hovered is not None:
+            if self.hovered is not None and self.hovered.get("ocr"):
+                painter.fillRect(self._span_rect(self.hovered), QColor(100, 116, 139, 30))
+            elif self.hovered is not None:
                 painter.setPen(QPen(QColor(0, 120, 215), 2))
                 painter.fillRect(self._span_rect(self.hovered), QColor(0, 120, 215, 40))
                 painter.drawRect(self._span_rect(self.hovered))
@@ -1151,6 +1156,7 @@ class PageWidget(QWidget):
         span = None if field is not None else self._span_at(event.position())
         if span is not self.hovered:
             self.hovered = span
+            self.setToolTip(OCR_EDIT_HINT if span is not None and span.get("ocr") else "")
             self.update()
 
     def leaveEvent(self, event):
@@ -1176,7 +1182,9 @@ class PageWidget(QWidget):
             self.activate_field(field, event.globalPosition().toPoint())
         elif self.edit_mode:
             span = self._span_at(event.position())
-            if span is not None:
+            if span is not None and span.get("ocr"):
+                self.ocr_text_clicked.emit(self.index)
+            elif span is not None:
                 self.open_editor(span)
 
     def activate_field(self, field, global_pos):
@@ -5540,6 +5548,11 @@ def ocr_lines(words, factor=1.0):
         line.sort(key=lambda word: word[0])
         top, bottom = min(word[1] for word in line), max(word[3] for word in line)
         lines.append((bottom - top, bottom, [(word[0], word[2], word[4]) for word in line]))
+    # Un trait de tableau collé à un mot étire parfois la ligne entière (95 points au lieu de 17) : une ligne plus de
+    # deux fois plus haute que la ligne type de la page reprend sa hauteur, sous le même bas de ligne.
+    if len(lines) >= 3:
+        usual = sorted(height for height, _base, _words in lines)[len(lines) // 2]
+        lines = [(usual if height > 2 * usual else height, base, words) for height, base, words in lines]
     return lines
 
 
@@ -5887,7 +5900,7 @@ class OcrDialog(QDialog):
         grid.setVerticalSpacing(6)
         grid.addWidget(QLabel("Pages :"), 0, 0)
         self.all_pages = QRadioButton(f"Toutes les pages ({count})")
-        self.some_pages = QRadioButton("Pages :")
+        self.some_pages = QRadioButton("Seulement les pages :")
         self.pages_edit = QLineEdit(str(editor.current_page() + 1))
         self.pages_edit.setPlaceholderText("exemple : 1-3, 7")
         self.pages_edit.setToolTip("Numéros de pages et plages, séparés par des virgules : 1-3, 7")
@@ -5951,8 +5964,7 @@ class OcrDialog(QDialog):
         self.close_button = QPushButton("Fermer")
         self.close_button.setAutoDefault(False)
         self.close_button.clicked.connect(self.reject)
-        self.start_button = QPushButton(make_icon("ocr"), "Lancer")
-        self.start_button.setIconSize(QSize(18, 18))
+        self.start_button = QPushButton("Lancer")
         self.start_button.setDefault(True)
         set_primary(self.start_button)
         self.start_button.clicked.connect(self.start)
@@ -5981,6 +5993,7 @@ class OcrDialog(QDialog):
             QMessageBox.critical(self, "Données de langue absentes", missing_language_message(missing))
             return
         self.result = {}
+        self.changed = False
         self.job = ocr_document(self.editor.doc, pages, language, self.skip_box.isChecked(),
                                 self.straighten_box.isChecked(), self._before_change, self.result)
         for widget in (self.all_pages, self.some_pages, self.pages_edit, self.language_combo, self.skip_box,
@@ -6131,6 +6144,10 @@ FEATURES = [
      "Voyez côte à côte ce qui a changé entre deux versions d'un document : mots ajoutés, supprimés ou modifiés, "
      "images, pages en plus ou en moins. Exportez un rapport PDF des différences.",
      "Ctrl+Maj+C"),
+    ("ocr", "Reconnaissance de texte (OCR)",
+     "Rendez un PDF scanné cherchable, et son texte sélectionnable et copiable : le texte lu sur l'image est posé, "
+     "invisible, sur chaque page. Tout se fait sur cet ordinateur.",
+     "Ctrl+Maj+O"),
 ]
 
 
@@ -6436,6 +6453,11 @@ class PdfEditor(QMainWindow):
         self.insert_signature_action.triggered.connect(lambda: self.insert_image_dialog(signature=True))
         edit_menu.addAction(self.insert_signature_action)
 
+        self.ocr_action = QAction(make_icon("ocr"), "Reconnaissance de te&xte (OCR)…", self)
+        self.ocr_action.setShortcut("Ctrl+Shift+O")
+        self.ocr_action.triggered.connect(self.ocr_dialog)
+        edit_menu.addAction(self.ocr_action)
+
         edit_menu.addSeparator()
 
         self.find_action = QAction(make_icon("search"), "&Rechercher…", self)
@@ -6493,7 +6515,9 @@ class PdfEditor(QMainWindow):
             f"<p style='margin-top:4px;'><b>Version {APP_VERSION}</b> — {APP_DATE}</p>"
             "<p>Éditeur de PDF : modification du texte, concaténation, organisation, rotation "
             "et suppression des pages, recherche et remplacement, annulation et rétablissement, impression, "
-            "photos d'identité, comparaison de deux PDF.</p>"
+            "photos d'identité, comparaison de deux PDF, reconnaissance de texte (OCR).</p>"
+            f"<p style='color:{SLATE};'>Reconnaissance de texte : Tesseract (licence Apache 2.0), intégré à PyMuPDF, "
+            "avec ses données de langue française et anglaise.</p>"
             f"<p>Application écrite par <b>{APP_AUTHOR}</b><br>"
             f"<span style='color:{SLATE};'>Modèle : {APP_AUTHOR_MODEL}</span><br>"
             f"sous le commandement de <b>{APP_DIRECTOR}</b>.</p>",
@@ -6514,7 +6538,7 @@ class PdfEditor(QMainWindow):
              (self.save_action, "Enregistrer"), (self.print_action, "Imprimer"), (self.close_action, "Fermer")],
             [(self.undo_action, "Annuler"), (self.redo_action, "Rétablir")],
             [(self.edit_action, "Éditer le texte"), (self.reorder_action, "Pages"),
-             (self.find_action, "Rechercher"), (self.replace_action, "Remplacer")],
+             (self.find_action, "Rechercher"), (self.replace_action, "Remplacer"), (self.ocr_action, "OCR")],
             [(self.insert_image_action, "Image"), (self.insert_signature_action, "Signature")],
             [(self.zoom_out_action, "Zoom −")],
         ]
@@ -6554,7 +6578,7 @@ class PdfEditor(QMainWindow):
         self.modify_sheet_action.setVisible(has_doc and is_id_photo_sheet(self.doc))
         for action in (self.find_action, self.replace_action, self.find_next_action, self.find_previous_action,
                        self.zoom_in_action, self.zoom_out_action, self.goto_action,
-                       self.insert_image_action, self.insert_signature_action):
+                       self.insert_image_action, self.insert_signature_action, self.ocr_action):
             action.setEnabled(has_doc)
         self._update_zoom_label()
         self.undo_action.setEnabled(bool(self.undo_stack))
@@ -6701,6 +6725,7 @@ class PdfEditor(QMainWindow):
             widget.placement_cancelled.connect(self.cancel_image)
             widget.rotate_requested.connect(self.rotate_page)
             widget.delete_requested.connect(self.delete_page)
+            widget.ocr_text_clicked.connect(self.explain_ocr_text)
             widget.set_edit_mode(self.edit_action.isChecked())
             self.layout.addWidget(widget)
             self.pages.append(widget)
@@ -7140,6 +7165,10 @@ class PdfEditor(QMainWindow):
         if not self.matches:
             return
         page_index, span, start, end = self.matches[self.match_index]
+        if span.get("ocr"):
+            self.statusBar().showMessage("Cette occurrence fait partie du texte reconnu par l'OCR, invisible sur l'image "
+                                         "du scan : elle ne peut pas être remplacée (F3 : occurrence suivante).", 10000)
+            return
         replacement = self.search_bar.replace_edit.text()
         self.edit_span(page_index, span, span["text"][:start] + replacement + span["text"][end:], "remplacement")
         # L'occurrence remplacée disparaît : l'indice courant désigne déjà la suivante,
@@ -7153,10 +7182,17 @@ class PdfEditor(QMainWindow):
             return
         pattern = self._search_pattern()
         replacement = self.search_bar.replace_edit.text()
-        count = len(self.matches)
+        recognized = sum(1 for _page, span, _start, _end in self.matches if span.get("ocr"))
+        count = len(self.matches) - recognized
+        if not count:
+            self.statusBar().showMessage("Ces occurrences font toutes partie du texte reconnu par l'OCR, invisible sur "
+                                         "l'image du scan : elles ne peuvent pas être remplacées.", 10000)
+            return
 
         by_page = {}
         for page_index, span, _, _ in self.matches:
+            if span.get("ocr"):
+                continue
             spans = by_page.setdefault(page_index, [])
             if not any(s is span for s in spans):
                 spans.append(span)
@@ -7177,6 +7213,8 @@ class PdfEditor(QMainWindow):
         message = f"{count} occurrence(s) remplacée(s) (Ctrl+Z pour annuler)."
         if not all(exact for exact, _message in results):
             message += " Certaines lettres absentes de la police d'origine ont été prises dans une police proche."
+        if recognized:
+            message += f" {recognized} occurrence(s) du texte reconnu par l'OCR laissée(s) telle(s) quelle(s)."
         self.statusBar().showMessage(message, 6000)
 
     def reorder_dialog(self):
@@ -7614,6 +7652,29 @@ class PdfEditor(QMainWindow):
             10000,
         )
 
+    def ocr_dialog(self):
+        """Reconnaissance de texte (OCR) : rend le texte des pages scannées cherchable, sélectionnable et copiable."""
+        if self.doc is None:
+            return
+        for widget in self.pages:  # saisie ou placement d'image en cours : abandonnés
+            widget.close_editor()
+            widget.end_placement(False)
+        OcrDialog(self).exec()
+
+    def ocr_applied(self, result):
+        """Après une reconnaissance (terminée ou interrompue) qui a modifié le document : les pages sont redessinées
+        (certaines ont pu être redressées) et la recherche en cours tient compte du texte reconnu."""
+        self._set_modified(True)
+        self._update_actions()
+        self.render_all()
+        done = len(result["done"])
+        self.statusBar().showMessage(f"Texte reconnu sur {done} page{'s' if done > 1 else ''} : il se cherche (Ctrl+F) "
+                                     "et se copie. Ctrl+Z pour annuler.", 10000)
+
+    def explain_ocr_text(self, _page_index):
+        self.statusBar().showMessage(OCR_EDIT_HINT + " Pour le corriger, refaites l'OCR de la page (Ctrl+Maj+O), "
+                                     "« Ignorer les pages qui contiennent déjà du texte » décoché.", 15000)
+
     def compare_dialog(self):
         """Compare deux PDF ; le document ouvert, avec ses modifications, est proposé comme version A."""
         current = None
@@ -7854,7 +7915,30 @@ class PdfEditor(QMainWindow):
             event.ignore()
 
 
+def ocr_command_line(arguments):
+    """« --ocr entrée.pdf sortie.pdf [fra|eng|fra+eng] » : reconnaissance du texte de toutes les pages, sans fenêtre,
+    avec les réglages par défaut (pages qui ont déjà du texte ignorées, pages tournées redressées). Sert aux essais de
+    l'exécutable construit et au traitement par lots. Renvoie le code de sortie : 0 si tout va bien."""
+    if len(arguments) not in (2, 3):
+        return 2
+    source, target = arguments[0], arguments[1]
+    language = arguments[2] if len(arguments) == 3 else "fra"
+    try:
+        doc = pymupdf.open(source)
+        for _progress in ocr_document(doc, list(range(len(doc))), language):
+            pass
+        doc.save(target, garbage=3, deflate=True)
+        doc.close()
+    except Exception as exc:
+        if sys.stderr is not None:  # aucune console pour l'exécutable fenêtré
+            sys.stderr.write(f"OCR impossible : {exc}\n")
+        return 1
+    return 0
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--ocr":
+        sys.exit(ocr_command_line(sys.argv[2:]))
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setStyle("Fusion")
