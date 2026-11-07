@@ -241,12 +241,39 @@ def compare_icon():
     return icon
 
 
+def ocr_icon():
+    """Coins de cadrage d'un scanner autour d'un « T », aux couleurs de l'application : lire le texte d'une image."""
+    icon = QIcon()
+    for size in (18, 22, 32, 44, 64):
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.scale(size / 64, size / 64)  # dessin sur une grille de 64 × 64
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor("#3b82f6"), 6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                            Qt.PenJoinStyle.RoundJoin))
+        for x, y, dx, dy in ((6, 6, 1, 1), (58, 6, -1, 1), (6, 58, 1, -1), (58, 58, -1, -1)):
+            corner = QPainterPath(QPointF(x, y + 15 * dy))
+            corner.lineTo(x, y)
+            corner.lineTo(x + 15 * dx, y)
+            painter.drawPath(corner)
+        painter.setPen(QPen(QColor("#7c3aed"), 7, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawLine(QPointF(20, 21), QPointF(44, 21))
+        painter.drawLine(QPointF(32, 21), QPointF(32, 45))
+        painter.end()
+        icon.addPixmap(pixmap)
+    return icon
+
+
 def make_icon(name):
     """Icône dessinée à partir d'un symbole Unicode (aucun fichier image nécessaire)."""
     if name in ("zoom_in", "zoom_out"):
         return zoom_icon(name == "zoom_in")
     if name == "compare":
         return compare_icon()
+    if name == "ocr":
+        return ocr_icon()
     glyph, color = ICONS[name]
     pixmap = QPixmap(64, 64)  # grande taille : reste net sur les écrans haute résolution
     pixmap.fill(Qt.GlobalColor.transparent)
@@ -621,12 +648,19 @@ def base14_font(flags):
     return names[bold + italic]
 
 
+def is_ocr_span(span):
+    """Texte invisible (mode de rendu 3, ou transparent) ou écrit dans la police des calques OCR : du texte reconnu
+    sur une image et posé dessus pour la recherche et la copie, par cette application ou par une autre."""
+    return span.get("alpha", 255) == 0 or "GlyphLessFont" in span["font"]
+
+
 def page_spans(page):
     """Renvoie les fragments de texte (spans) non vides de la page.
 
     "bbox" et "origin" sont en coordonnées de page non pivotée (celles qu'attendent
     les fonctions d'édition) ; "view" est le rectangle tel qu'affiché, rotation comprise.
     "chars" donne la position de chaque caractère (pour surligner une partie du texte).
+    "ocr" repère le texte invisible (calque OCR posé sur une image) : il ne se modifie pas.
     """
     data = page.get_text("rawdict", flags=pymupdf.TEXTFLAGS_TEXT)
     spans = []
@@ -634,10 +668,21 @@ def page_spans(page):
         if block["type"] != 0:
             continue
         for line in block["lines"]:
+            merged = []
             for span in line["spans"]:
                 span["text"] = "".join(ch["c"] for ch in span["chars"])
-                if span["text"].strip():
-                    spans.append(span)
+                span["ocr"] = is_ocr_span(span)
+                # Un calque OCR étire chaque mot à sa largeur : PyMuPDF en fait autant de fragments (leur taille
+                # apparente diffère). Ceux d'une même ligne sont réunis, pour que la recherche trouve aussi une suite
+                # de mots.
+                if span["ocr"] and merged and merged[-1]["ocr"]:
+                    last = merged[-1]
+                    last["chars"] = last["chars"] + span["chars"]
+                    last["text"] += span["text"]
+                    last["bbox"] = tuple(pymupdf.Rect(last["bbox"]) | pymupdf.Rect(span["bbox"]))
+                else:
+                    merged.append(span)
+            spans += [span for span in merged if span["text"].strip()]
     for span in spans:
         span["matrix"] = page.rotation_matrix
         span["view"] = tuple(pymupdf.Rect(span["bbox"]) * page.rotation_matrix)
@@ -5292,6 +5337,747 @@ class CompareDialog(QDialog):
                 self.docs[side].close()
                 self.docs[side] = None
         super().done(result)
+
+
+# --- Reconnaissance de caractères (OCR) ---------------------------------------------------------------------------
+#
+# Le Tesseract intégré à PyMuPDF lit chaque page rendue en image ; le texte reconnu est posé sur la page en calque
+# invisible (mode de rendu 3), mot par mot, à la place de chaque mot de l'image : la page devient cherchable,
+# sélectionnable et copiable sans changer d'aspect. Tout se fait sur l'ordinateur, avec les données de langue livrées
+# dans le dossier tessdata (modèles « best_int » de Tesseract, licence Apache 2.0).
+
+OCR_DPI = 300  # résolution des pages lues : un texte de 8 points y reste net
+OCR_ORIENTATION_DPI = 150  # rendu réduit, pour essayer vite les quatre sens d'une page qui se lit mal
+OCR_MAX_PIXELS = 36_000_000  # au-delà (affiche, plan A1…), la résolution baisse pour ménager la mémoire
+OCR_MIN_DPI = 100
+OCR_LANGUAGES = (("fra", "Français"), ("eng", "Anglais"), ("fra+eng", "Français et anglais"))
+OCR_LANGUAGE_NAMES = {"fra": "français", "eng": "anglais"}
+# Mise en page automatique (3) : sans elle, Tesseract lit la page comme un seul bloc de texte et saute les tableaux.
+OCR_TESSERACT_OPTIONS = "tessedit_pageseg_mode=3"
+OCR_FONT = "GlyphLessFont"  # nom usuel de la police des calques OCR (Tesseract, MuPDF, OCRmyPDF…)
+OCR_MARKER = "PDFToolkitOCR"  # clé du formulaire (XObject) qui porte le calque : refaire l'OCR le remplace
+OCR_XOBJECT = "PTOcr"  # préfixe de son nom dans les ressources de la page
+OCR_UPRIGHT_WORDS = 3  # mots courants à partir desquels une page est tenue pour lue à l'endroit…
+OCR_UPRIGHT_SHARE = 0.2  # … s'ils font au moins 20 % des mots (voir ocr_common_words)
+OCR_EDIT_HINT = ("Texte reconnu par l'OCR : invisible, posé sur l'image du scan pour la recherche et la copie. "
+                 "Il ne se modifie pas : le texte réécrit s'afficherait par-dessus l'image.")
+
+# Police sans aucun dessin de Tesseract (572 octets, Apache 2.0, telle que MuPDF l'écrit) : chaque caractère y est un
+# blanc d'un demi-cadratin. Avec le codage Identity-H, le code d'un caractère est son numéro Unicode, et la table
+# ToUnicode le rend tel quel : toutes les lettres sont couvertes (é è ê à ç œ « » ’ €…), pour la recherche comme
+# pour le copier-coller.
+OCR_GLYPHLESS_TTF = bytes.fromhex(
+    "00010000000a0080000300204f532f3256dec8940000012800000060636d6170000a0034000001900000001e676c796615224124000001b8"
+    "00000018686561640b78f165000000ac00000036686865610c020402000000e400000024686d74780400000000000188000000086c6f6361"
+    "000c0000000001b0000000066d6178700004000500000108000000206e616d65f2eb16da000001d00000004b706f7374000100010000021c"
+    "000000200001000000010000b09471105f0f3cf50407080000000000cf9afc6e00000000d4c3a7f200000000040008000000001000020000"
+    "00000000000100000800ffff0000040000000000040000010000000000000000000000000000000200010000000200040001000000000001"
+    "0000000000000000000000000000000000030000019000050000000000000000000000000000000000000000000000000500010001000000"
+    "000000000000000000000000000000000000474f4f470040000000000001ffff000000010001800000000000000000000000000000010000"
+    "000000000400000000000002000100000000001400030000000000140006000a000000000000000000000000000c00000001000000000400"
+    "080000030000312111210400fc00080000000003002a0000000300000005001600000001000000000005000b001600030001040900050016"
+    "000000560065007200730069006f006e00200031002e003056657273696f6e20312e30000001000000000000000000000000000100000000"
+    "000000000000000000000000"
+)
+OCR_TO_UNICODE = b"""/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def
+/CMapName /Adobe-Identity-UCS def
+/CMapType 2 def
+1 begincodespacerange
+<0000> <FFFF>
+endcodespacerange
+1 beginbfrange
+<0000> <FFFF> <0000>
+endbfrange
+endcmap
+CMapName currentdict /CMap defineresource pop
+end
+end
+"""
+
+# Mots courants du français et de l'anglais : une page lue à l'endroit en contient beaucoup, une page lue à l'envers
+# ou de travers presque aucun (Tesseract y voit « sadinbo SOA » ou des lettres isolées).
+OCR_COMMON_WORDS = frozenset("""
+le la les de des du un une et en au aux ce ces cet cette il ils elle elles on nous vous je tu ne pas plus que qui
+dont où est sont été être avoir ont fait par pour sur sous dans avec sans chez entre après avant mais ou donc car si
+comme tout tous toute toutes son sa ses leur leurs notre nos votre vos mon ma mes se lui moins très bien aussi
+the and of to in is it that for on with as was are be by this at from or an not but have has had they we you he she
+his her their our your will would can there which who what when all any if no do into than then also more about
+""".split())
+
+# Ce que MuPDF écrit pour chaque mot du calque de son PDF « pdfocr » : taille de la ligne (Tf), étirement (Tz),
+# déplacement (Td) et mot en Unicode sur 4 chiffres hexadécimaux par caractère (Tj).
+OCR_STREAM_TOKENS = re.compile(rb"/F0\s+(-?[\d.]+)\s+Tf|(-?[\d.]+)\s+Tz|(-?[\d.]+)\s+(-?[\d.]+)\s+Td|<([0-9A-Fa-f]*)>\s*Tj")
+
+
+class OcrError(Exception):
+    """Échec de la reconnaissance de texte, avec un message pour l'utilisateur."""
+
+
+def tessdata_location():
+    """(dossier, nom du sous-dossier) des données de langue de Tesseract, livrées avec le programme : à côté de main.py,
+    ou dans le dossier où l'exécutable s'extrait (sys._MEIPASS)."""
+    return getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__)), "tessdata"
+
+
+def missing_ocr_languages(language):
+    """Langues de « fra+eng » dont le fichier de données manque."""
+    base, folder = tessdata_location()
+    return [code for code in language.split("+")
+            if not os.path.isfile(os.path.join(base, folder, code + ".traineddata"))]
+
+
+def missing_language_message(codes):
+    names = " et ".join(OCR_LANGUAGE_NAMES.get(code, code) for code in codes)
+    base, folder = tessdata_location()
+    return (f"Les données de reconnaissance du {names} sont introuvables (fichier "
+            f"{', '.join(code + '.traineddata' for code in codes)} absent de {os.path.join(base, folder)}). "
+            "Réinstallez l'application, ou choisissez une autre langue.")
+
+
+def parse_pdfocr(content, height):
+    """Mots du calque de texte écrit par MuPDF (voir ocr_pixmap) : [(x0, y0, x1, y1, texte, ligne)], en points, y vers
+    le bas. Les mots d'une même ligne ont la même ligne de base et la même taille ; ligne les numérote, dans l'ordre de
+    lecture de Tesseract (une colonne après l'autre). Le texte vertical, que MuPDF écrit caractère par caractère en
+    remontant (déplacement purement vertical vers le haut), est écarté : il ne vient que d'une page lue de travers."""
+    words = []
+    size = scale = x = y = 0.0
+    rising = False
+    line, key = -1, None
+    for token in OCR_STREAM_TOKENS.finditer(content):
+        if token.group(1) is not None:
+            size = float(token.group(1))
+        elif token.group(2) is not None:
+            scale = float(token.group(2))
+        elif token.group(3) is not None:
+            dx, dy = float(token.group(3)), float(token.group(4))
+            x, y = x + dx, y + dy
+            rising = dx == 0 and dy > 0
+        else:
+            codes = token.group(5)
+            if (rising and len(codes) == 4) or size <= 0 or scale <= 0 or not codes or len(codes) % 4:
+                continue
+            text = bytes.fromhex(codes.decode("ascii")).decode("utf-16-be", "replace")
+            if (round(y, 2), round(size, 2)) != key:
+                key, line = (round(y, 2), round(size, 2)), line + 1
+            width = scale * size * (len(codes) // 4) / 200  # un caractère : un demi-cadratin, étiré de scale %
+            words.append((x, height - y - size, x + width, height - y, text, line))
+    return words
+
+
+def ocr_pixmap(pix, language):
+    """Lit le texte d'une image (Pixmap RVB dont la résolution est fixée) avec le Tesseract intégré à MuPDF.
+
+    MuPDF écrit un PDF de l'image avec son calque de texte (« pdfocr »), dont on relit les mots : renvoie ceux de
+    parse_pdfocr, en points de l'image (pixels × 72 / résolution). Une image en niveaux de gris ne convient pas :
+    MuPDF 1.28 n'en lit que la première ligne.
+
+    Les données de langue sont désignées par un chemin relatif au dossier courant, le temps de la lecture : Tesseract
+    les ouvre avec fopen, qui ne sait pas lire un chemin accentué sous Windows (C:\\Users\\Hélène\\…)."""
+    mu = pymupdf.mupdf
+    options = mu.FzPdfocrOptions()
+    options.compress = 0
+    options.language_set2(language)
+    base, folder = tessdata_location()
+    options.datadir_set2(folder)
+    variables = mu.FzOptions(OCR_TESSERACT_OPTIONS)  # à garder jusqu'à la fin : options n'en garde que l'adresse
+    options.options = variables.m_internal
+    buffer = mu.FzBuffer(pix.stride * pix.height + 65536)
+    out = mu.FzOutput(buffer)
+    previous = os.getcwd()
+    os.chdir(base)
+    try:
+        mu.fz_write_pixmap_as_pdfocr(out, pix.this, options)
+    except Exception as exc:
+        if "language" in str(exc).lower():
+            raise OcrError(missing_language_message(language.split("+"))) from exc
+        raise
+    finally:
+        os.chdir(previous)
+        try:
+            out.fz_close_output()
+        except Exception:
+            pass
+    ocr = pymupdf.open("pdf", buffer.fz_buffer_extract())
+    try:
+        page = ocr[0]
+        return parse_pdfocr(page.read_contents(), page.rect.height)
+    finally:
+        ocr.close()
+
+
+def ocr_render(page, dpi, rotation=0):
+    """Image RVB de la page telle qu'affichée (annotations exclues), tournée en plus de rotation degrés, à environ dpi
+    points par pouce (moins pour une très grande page). Renvoie (pixmap, facteur des points de l'image lue par
+    ocr_pixmap vers les points de la page)."""
+    rect = page.rect
+    zoom = dpi / 72
+    pixels = rect.width * rect.height * zoom * zoom
+    if pixels > OCR_MAX_PIXELS:
+        zoom = max(OCR_MIN_DPI / 72, zoom * math.sqrt(OCR_MAX_PIXELS / pixels))
+    pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom).prerotate(rotation), alpha=False, annots=False)
+    resolution = max(1, round(zoom * 72))
+    pix.set_dpi(resolution, resolution)
+    return pix, resolution / 72 / zoom
+
+
+def ocr_lines(words, factor=1.0):
+    """Regroupe les mots lus en lignes, dans l'ordre de lecture, et écarte le bruit : traits de tableau lus « | »,
+    lignes sans lettre ni chiffre (taches lues « . » ou « - »). Renvoie [(hauteur, ligne de base, [(x0, x1, texte)])],
+    en points de la page (factor : voir ocr_render). La ligne de base est le bas de la ligne : le texte du calque
+    couvre exactement la ligne de l'image, jambages compris."""
+    grouped = {}
+    for x0, y0, x1, y1, text, line in words:
+        text = text.strip("|¦")
+        if text.strip():
+            grouped.setdefault(line, []).append((x0 * factor, y0 * factor, x1 * factor, y1 * factor, text))
+    lines = []
+    for line in grouped.values():
+        if not any(ch.isalnum() for word in line for ch in word[4]):
+            continue
+        line.sort(key=lambda word: word[0])
+        top, bottom = min(word[1] for word in line), max(word[3] for word in line)
+        lines.append((bottom - top, bottom, [(word[0], word[2], word[4]) for word in line]))
+    return lines
+
+
+def ocr_common_words(lines):
+    """(nombre de mots courants, leur part parmi les mots d'au moins deux lettres) : mots courants du français ou de
+    l'anglais. Sur les pages d'essai, une page lue à l'endroit en compte de 25 à 40 % ; lue à l'envers ou de
+    travers, quelques-uns par hasard (« ne », « son »), 14 % au plus."""
+    count = words_count = 0
+    for _height, _base, words in lines:
+        for _x0, _x1, text in words:
+            for part in re.split(r"[’'\-]", text.lower()):
+                part = part.strip(".,;:!?«»“”\"()[]")
+                if sum(ch.isalpha() for ch in part) >= 2:
+                    words_count += 1
+                    count += part in OCR_COMMON_WORDS
+    return count, count / max(1, words_count)
+
+
+def ocr_reads_well(score):
+    return score[0] >= OCR_UPRIGHT_WORDS and score[1] >= OCR_UPRIGHT_SHARE
+
+
+def ocr_page_lines(page, language, rotation=0, dpi=OCR_DPI):
+    """Lignes lues sur la page affichée, tournée en plus de rotation degrés, dans les coordonnées de la page ainsi
+    tournée (voir ocr_lines)."""
+    pix, factor = ocr_render(page, dpi, rotation)
+    try:
+        words = ocr_pixmap(pix, language)
+    finally:
+        pix = None
+    return ocr_lines(words, factor)
+
+
+def ocr_text(lines):
+    """Le texte lu, ligne par ligne, dans l'ordre de lecture."""
+    return "\n".join(" ".join(word[2] for word in words) for _height, _base, words in lines)
+
+
+def display_to_pdf(page):
+    """Matrice des coordonnées de la page affichée (points, origine en haut à gauche, rotation du fichier comprise)
+    vers l'espace du PDF : celle de MuPDF, juste même pour une page pivotée dont la MediaBox ne part pas de zéro."""
+    mu = pymupdf.mupdf
+    ctm = mu.FzMatrix()
+    mu.pdf_page_transform(mu.pdf_page_from_fz_page(page.this), mu.FzRect(), ctm)
+    return ~pymupdf.Matrix(ctm.a, ctm.b, ctm.c, ctm.d, ctm.e, ctm.f)
+
+
+def ocr_number(value):
+    text = f"{value:.3f}".rstrip("0").rstrip(".")
+    return "0" if text in ("", "-0") else text
+
+
+def ocr_layer_stream(lines, matrix):
+    """Contenu du calque : texte invisible (3 Tr) en police /F0 (ocr_font), ligne par ligne. Chaque mot est posé à sa
+    place et étiré (Tz) à sa largeur sur l'image, pour que la sélection tombe juste ; une espace, étirée elle aussi,
+    comble l'écart jusqu'au mot suivant, pour que le copier-coller sépare les mots dans toutes les visionneuses.
+    Coordonnées des lignes : celles de la page affichée ; matrix les ramène à l'espace du PDF."""
+    out = [" ".join(ocr_number(v) for v in matrix) + " cm", "BT", "3 Tr"]
+    for height, base, words in lines:
+        if height <= 0:
+            continue
+        out.append(f"/F0 {ocr_number(height)} Tf")
+        for k, (x0, x1, text) in enumerate(words):
+            units = "".join(ch if ord(ch) < 0x10000 else "\ufffd" for ch in text).encode("utf-16-be")
+            count = len(units) // 2
+            if not count:
+                continue
+            scale = max(1.0, 100 * (x1 - x0) / (count * 0.5 * height))
+            # Repère de la page affichée (y vers le bas) : la matrice de texte retourne l'axe y.
+            out.append(f"{ocr_number(scale)} Tz 1 0 0 -1 {ocr_number(x0)} {ocr_number(base)} Tm "
+                       f"<{units.hex().upper()}> Tj")
+            if k + 1 < len(words):
+                gap = words[k + 1][0] - x1
+                out.append(f"{ocr_number(max(1.0, 100 * gap / (0.5 * height)))} Tz <0020> Tj")
+    out.append("ET")
+    return ("\n".join(out) + "\n").encode("ascii")
+
+
+def new_pdf_object(doc, source, stream=None):
+    xref = doc.get_new_xref()
+    doc.update_object(xref, source)
+    if stream is not None:
+        doc.update_stream(xref, stream)
+    return xref
+
+
+def ocr_font(doc):
+    """Ajoute au document la police des calques OCR (Type 0, Identity-H, GlyphLessFont intégrée) ; renvoie son xref."""
+    font_file = new_pdf_object(doc, f"<</Length1 {len(OCR_GLYPHLESS_TTF)}>>", OCR_GLYPHLESS_TTF)
+    descriptor = new_pdf_object(
+        doc, f"<</Type/FontDescriptor/FontName/{OCR_FONT}/Flags 5/FontBBox[0 0 500 1000]/ItalicAngle 0/Ascent 1000"
+             f"/Descent -1/CapHeight 1000/StemV 80/FontFile2 {font_file} 0 R>>")
+    cid_to_gid = new_pdf_object(doc, "<<>>", b"\x00\x01" * 65536)  # tous les caractères : le glyphe blanc n° 1
+    to_unicode = new_pdf_object(doc, "<<>>", OCR_TO_UNICODE)
+    descendant = new_pdf_object(
+        doc, f"<</Type/Font/Subtype/CIDFontType2/BaseFont/{OCR_FONT}/CIDSystemInfo<</Registry(Adobe)"
+             f"/Ordering(Identity)/Supplement 0>>/FontDescriptor {descriptor} 0 R/DW 500"
+             f"/CIDToGIDMap {cid_to_gid} 0 R>>")
+    return new_pdf_object(doc, f"<</Type/Font/Subtype/Type0/BaseFont/{OCR_FONT}/Encoding/Identity-H"
+                               f"/DescendantFonts[{descendant} 0 R]/ToUnicode {to_unicode} 0 R>>")
+
+
+def ocr_layers(doc, page):
+    """Les calques OCR posés par cette application sur la page : [(nom de la ressource, xref)]."""
+    return [(name, xref) for xref, name, invoker, _bbox in page.get_xobjects()
+            if invoker == 0 and doc.xref_get_key(xref, OCR_MARKER)[0] != "null"]
+
+
+def inherited_resources(doc, page):
+    """Le dictionnaire de ressources que la page hérite de l'arbre des pages (sa source PDF), ou None."""
+    node = page.xref
+    for _depth in range(32):
+        kind, value = doc.xref_get_key(node, "Parent")
+        if kind != "xref":
+            return None
+        node = int(value.split()[0])
+        kind, value = doc.xref_get_key(node, "Resources")
+        if kind == "xref":
+            return doc.xref_object(int(value.split()[0]), compressed=True)
+        if kind == "dict":
+            return value
+    return None
+
+
+def own_resources(doc, page):
+    """Donne à la page un dictionnaire de ressources à elle, copie de celui qu'elle a, partage avec d'autres pages ou
+    hérite, avec un dictionnaire XObject direct ; renvoie son xref. Ajouter le calque d'une page ne touche ainsi
+    jamais aux ressources d'une autre."""
+    kind, value = doc.xref_get_key(page.xref, "Resources")
+    if kind == "xref":
+        source = doc.xref_object(int(value.split()[0]), compressed=True)
+    elif kind == "dict":
+        source = value
+    else:
+        source = inherited_resources(doc, page) or "<<>>"
+    resources = new_pdf_object(doc, source)
+    kind, value = doc.xref_get_key(resources, "XObject")
+    if kind == "xref":
+        doc.xref_set_key(resources, "XObject", doc.xref_object(int(value.split()[0]), compressed=True))
+    elif kind != "dict":
+        doc.xref_set_key(resources, "XObject", "<<>>")
+    doc.xref_set_key(page.xref, "Resources", f"{resources} 0 R")
+    return resources
+
+
+def add_ocr_layer(doc, page, xref):
+    """Ajoute le formulaire xref aux ressources de la page, sous un nom libre, et le dessine par-dessus tout le contenu
+    (dans des flux ajoutés : le contenu existant est isolé entre q et Q)."""
+    used = {name for _xref, name, *_rest in page.get_xobjects()}
+    number = 1
+    while f"{OCR_XOBJECT}{number}" in used:
+        number += 1
+    name = f"{OCR_XOBJECT}{number}"
+    doc.xref_set_key(own_resources(doc, page), f"XObject/{name}", f"{xref} 0 R")
+    begin = new_pdf_object(doc, "<<>>", b"q\n")
+    end = new_pdf_object(doc, "<<>>", f"Q\nq /{name} Do Q\n".encode("ascii"))
+    streams = [begin, *page.get_contents(), end]
+    doc.xref_set_key(page.xref, "Contents", "[" + " ".join(f"{x} 0 R" for x in streams) + "]")
+
+
+def set_ocr_layer(doc, page, lines, font_xref):
+    """Pose le calque OCR de la page : un formulaire (XObject) marqué OCR_MARKER, dessiné en dernier. Sur une page déjà
+    passée à l'OCR, le calque existant est réécrit : le texte n'est jamais ajouté en double."""
+    matrix = display_to_pdf(page)
+    box = page.rect * matrix  # la page affichée, dans l'espace du PDF
+    source = (f"<</Type/XObject/Subtype/Form/BBox[{ocr_number(box.x0 - 1)} {ocr_number(box.y0 - 1)} "
+              f"{ocr_number(box.x1 + 1)} {ocr_number(box.y1 + 1)}]/Resources<</Font<</F0 {font_xref} 0 R>>>>"
+              f"/{OCR_MARKER} 1>>")
+    stream = ocr_layer_stream(lines, matrix)
+    layers = ocr_layers(doc, page)
+    if layers:
+        _name, xref = layers[0]
+        doc.update_object(xref, source)
+        doc.update_stream(xref, stream)
+        for _other_name, other in layers[1:]:
+            doc.update_stream(other, b"")  # calques en trop d'un ancien passage : vidés
+    else:
+        add_ocr_layer(doc, page, new_pdf_object(doc, source, stream))
+
+
+def page_has_text(page):
+    """La page contient-elle déjà du texte, visible ou non (calque OCR compris) ?"""
+    return bool(page.get_text("text").strip())
+
+
+def ocr_document(doc, pages, language, skip_text=True, straighten=True, before_change=None, result=None):
+    """Reconnaît le texte des pages (indices) et le pose en calque invisible sur chacune.
+
+    Générateur : produit (avancement de 0 à 1, message) avant chaque lecture d'image, qui garde la main environ une
+    seconde, puis renvoie le bilan result : {"done": pages lues, "skipped": pages qui avaient déjà du texte,
+    "empty": pages sans texte reconnu, "rotated": {page: angle}, "failed": {page: raison}, "text": {page: texte}}.
+    Il est rempli au fur et à mesure : interrompu (close()), le document reste cohérent, car chaque page n'est modifiée
+    qu'à la fin de sa lecture, d'un seul coup ; les pages déjà lues gardent leur texte.
+
+    before_change() est appelé juste avant la première modification du document (push_undo). skip_text : les pages
+    qui ont déjà du texte sont laissées telles quelles ; sinon, un calque OCR existant est remplacé. straighten : une
+    page qui se lit mal est essayée dans les quatre sens, et redressée (/Rotate) si elle se lit mieux autrement.
+    Lève OcrError si les données de langue manquent."""
+    if result is None:
+        result = {}
+    for key in ("done", "skipped", "empty"):
+        result.setdefault(key, [])
+    for key in ("rotated", "failed", "text"):
+        result.setdefault(key, {})
+    missing = missing_ocr_languages(language)
+    if missing:
+        raise OcrError(missing_language_message(missing))
+    font = None
+    total = max(1, len(pages))
+    for k, index in enumerate(pages):
+        page = doc[index]
+        label = f"Page {index + 1} ({k + 1} sur {len(pages)})"
+        if skip_text and page_has_text(page):
+            result["skipped"].append(index)
+            continue
+        yield k / total, f"{label} : lecture du texte…"
+        rotation = 0
+        try:
+            lines = ocr_page_lines(page, language)
+            if straighten and not ocr_reads_well(ocr_common_words(lines)):
+                # Page qui se lit mal : essayée dans les quatre sens, à plus basse résolution. Un autre sens ne
+                # l'emporte que s'il se lit bien, et nettement mieux.
+                scores = {}
+                for turn in (0, 90, 180, 270):
+                    yield (k + 0.4 + turn / 900) / total, f"{label} : recherche du sens de lecture…"
+                    scores[turn] = ocr_common_words(ocr_page_lines(page, language, turn, OCR_ORIENTATION_DPI))
+                best = max(scores, key=lambda turn: scores[turn][0])
+                if best and ocr_reads_well(scores[best]) and scores[best][0] >= 2 * scores[0][0] + 1:
+                    yield (k + 0.8) / total, f"{label} : lecture dans le bon sens…"
+                    lines = ocr_page_lines(page, language, best)
+                    rotation = best
+        except OcrError:
+            raise
+        except MemoryError:
+            result["failed"][index] = "mémoire insuffisante"
+            continue
+        except Exception as exc:
+            result["failed"][index] = f"page illisible ({exc})"
+            continue
+        if not lines:
+            result["empty"].append(index)
+            continue
+        if font is None:
+            if before_change is not None:
+                before_change()
+            font = ocr_font(doc)
+        previous_rotation = page.rotation
+        try:
+            if rotation:
+                page.set_rotation((previous_rotation + rotation) % 360)
+            set_ocr_layer(doc, page, lines, font)
+        except Exception as exc:
+            if rotation:
+                page.set_rotation(previous_rotation)
+            result["failed"][index] = f"calque impossible à écrire ({exc})"
+            continue
+        if rotation:
+            result["rotated"][index] = rotation
+        result["done"].append(index)
+        result["text"][index] = ocr_text(lines)
+    return result
+
+
+def parse_page_ranges(text, count):
+    """« 1-3, 7 » -> [0, 1, 2, 6] (pages de 1 à count). Lève ValueError, avec un message, si la saisie est invalide."""
+    pages = set()
+    for part in text.replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        bounds = re.fullmatch(r"(\d+)\s*(?:[-–]\s*(\d+))?", part)
+        if not bounds:
+            raise ValueError(f"« {part} » n'est pas un numéro de page ni une plage (exemple : 1-3, 7).")
+        first = int(bounds.group(1))
+        last = int(bounds.group(2) or first)
+        if first > last:
+            first, last = last, first
+        if first < 1 or last > count:
+            raise ValueError(f"Le document a {count} page{'s' if count > 1 else ''} : « {part} » en sort.")
+        pages.update(range(first - 1, last))
+    if not pages:
+        raise ValueError("Indiquez les pages à lire (exemple : 1-3, 7).")
+    return sorted(pages)
+
+
+def ocr_export_text(result):
+    """Le texte reconnu, page par page, pour le presse-papiers ou un fichier .txt."""
+    return "\n\n".join(f"— Page {index + 1} —\n{result['text'][index]}" for index in sorted(result["text"]))
+
+
+def ocr_summary(result, cancelled=False):
+    """Bilan d'une reconnaissance, en une phrase ou deux."""
+    def pages(indices):
+        return ", ".join(str(i + 1) for i in sorted(indices))
+
+    done = len(result["done"])
+    parts = [f"Texte reconnu sur {done} page{'s' if done > 1 else ''}" if done else "Aucun texte ajouté"]
+    if result["rotated"]:
+        parts.append(f"redressée{'s' if len(result['rotated']) > 1 else ''} : page{'s' if len(result['rotated']) > 1 else ''} "
+                     f"{pages(result['rotated'])}")
+    if result["skipped"]:
+        parts.append(f"déjà du texte, laissée{'s' if len(result['skipped']) > 1 else ''} telle{'s' if len(result['skipped']) > 1 else ''} : "
+                     f"page{'s' if len(result['skipped']) > 1 else ''} {pages(result['skipped'])}")
+    if result["empty"]:
+        parts.append(f"aucun texte trouvé : page{'s' if len(result['empty']) > 1 else ''} {pages(result['empty'])}")
+    message = parts[0] + (" (" + " ; ".join(parts[1:]) + ")" if len(parts) > 1 else "") + "."
+    for index, reason in sorted(result["failed"].items()):
+        message += f" Page {index + 1} : {reason}."
+    if cancelled:
+        message = "Reconnaissance interrompue : les pages déjà lues gardent leur texte. " + message
+    return message
+
+
+class OcrDialog(QDialog):
+    """Reconnaissance de texte (OCR) du document ouvert : pages, langue et options, puis lecture page par page, avec
+    progression et bouton Annuler. Chaque lecture d'image garde la main environ une seconde (PyMuPDF ne rend pas la
+    main pendant le calcul) : la fenêtre se met à jour et l'annulation est prise en compte entre deux lectures.
+
+    Le document n'est modifié que par pages entières ; un premier changement appelle editor.push_undo, si bien que
+    Ctrl+Z annule toute l'opération d'un coup. Annuler en cours de route garde les pages déjà lues : relancer
+    l'OCR, en laissant « Ignorer les pages qui contiennent déjà du texte » coché, reprend où elle s'était arrêtée."""
+
+    def __init__(self, editor):
+        super().__init__(editor)
+        self.editor = editor
+        self.setWindowTitle("Reconnaissance de texte (OCR)")
+        self.job = None
+        self.result = None
+        self.changed = False  # le document a été modifié (au moins une page lue)
+        self.timer = QTimer(self)
+        self.timer.setInterval(0)
+        self.timer.timeout.connect(self._step)
+        count = len(editor.doc)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        intro = QLabel("Le texte des pages scannées est lu sur l'image, puis posé dessus en calque invisible : le "
+                       "document devient cherchable, et son texte sélectionnable et copiable, sans changer d'aspect. "
+                       "Tout se fait sur cet ordinateur.")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(6)
+        grid.addWidget(QLabel("Pages :"), 0, 0)
+        self.all_pages = QRadioButton(f"Toutes les pages ({count})")
+        self.some_pages = QRadioButton("Pages :")
+        self.pages_edit = QLineEdit(str(editor.current_page() + 1))
+        self.pages_edit.setPlaceholderText("exemple : 1-3, 7")
+        self.pages_edit.setToolTip("Numéros de pages et plages, séparés par des virgules : 1-3, 7")
+        self.pages_edit.textEdited.connect(lambda _text: self.some_pages.setChecked(True))
+        (self.all_pages if count > 1 else self.some_pages).setChecked(True)
+        some = QHBoxLayout()
+        some.addWidget(self.some_pages)
+        some.addWidget(self.pages_edit, 1)
+        grid.addWidget(self.all_pages, 0, 1)
+        grid.addLayout(some, 1, 1)
+        grid.addWidget(QLabel("Langue :"), 2, 0)
+        self.language_combo = QComboBox()
+        for code, label in OCR_LANGUAGES:
+            self.language_combo.addItem(label, code)
+        self.language_combo.setToolTip("Langue du texte à lire. « Français et anglais » convient à un document "
+                                       "mêlant les deux, mais lit un peu moins bien chacune et deux fois moins vite.")
+        grid.addWidget(self.language_combo, 2, 1)
+        grid.setColumnStretch(1, 1)
+        layout.addLayout(grid)
+
+        self.skip_box = QCheckBox("Ignorer les pages qui contiennent déjà du texte")
+        self.skip_box.setChecked(True)
+        self.skip_box.setToolTip("Décochez pour refaire l'OCR d'une page : le texte reconnu la première fois est "
+                                 "remplacé, jamais ajouté en double.")
+        self.straighten_box = QCheckBox("Redresser les pages scannées à l'envers ou d'un quart de tour")
+        self.straighten_box.setChecked(True)
+        self.straighten_box.setToolTip("Une page qui se lit mal est essayée dans les quatre sens, puis pivotée "
+                                       "pour s'afficher à l'endroit si elle se lit mieux autrement.")
+        layout.addWidget(self.skip_box)
+        hint = QLabel("Décochée, une page déjà passée à l'OCR est relue : son ancien texte reconnu est remplacé, "
+                      "jamais ajouté en double.")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        hint.setContentsMargins(24, 0, 0, 0)
+        layout.addWidget(hint)
+        layout.addWidget(self.straighten_box)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 1000)
+        self.progress.setTextVisible(False)
+        self.progress.setFixedHeight(10)
+        self.progress.hide()
+        layout.addWidget(self.progress)
+        self.status = QLabel()
+        self.status.setWordWrap(True)
+        self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.status)
+
+        buttons = QHBoxLayout()
+        self.copy_button = QPushButton("Copier le texte")
+        self.copy_button.setToolTip("Copier dans le presse-papiers le texte reconnu, page par page")
+        self.copy_button.clicked.connect(self.copy_text)
+        self.export_button = QPushButton(make_icon("save"), "Enregistrer en .txt…")
+        self.export_button.setIconSize(QSize(18, 18))
+        self.export_button.clicked.connect(self.export_text)
+        for button in (self.copy_button, self.export_button):
+            button.setAutoDefault(False)
+            button.hide()
+            buttons.addWidget(button)
+        buttons.addStretch()
+        self.close_button = QPushButton("Fermer")
+        self.close_button.setAutoDefault(False)
+        self.close_button.clicked.connect(self.reject)
+        self.start_button = QPushButton(make_icon("ocr"), "Lancer")
+        self.start_button.setIconSize(QSize(18, 18))
+        self.start_button.setDefault(True)
+        set_primary(self.start_button)
+        self.start_button.clicked.connect(self.start)
+        buttons.addWidget(self.close_button)
+        buttons.addWidget(self.start_button)
+        layout.addLayout(buttons)
+        self.setMinimumWidth(560)
+
+    # --- Calcul -------------------------------------------------------------------
+
+    def chosen_pages(self):
+        if self.all_pages.isChecked():
+            return list(range(len(self.editor.doc)))
+        return parse_page_ranges(self.pages_edit.text(), len(self.editor.doc))
+
+    def start(self):
+        try:
+            pages = self.chosen_pages()
+        except ValueError as exc:
+            self.status.setText(str(exc))
+            self.pages_edit.setFocus()
+            return
+        language = self.language_combo.currentData()
+        missing = missing_ocr_languages(language)
+        if missing:
+            QMessageBox.critical(self, "Données de langue absentes", missing_language_message(missing))
+            return
+        self.result = {}
+        self.job = ocr_document(self.editor.doc, pages, language, self.skip_box.isChecked(),
+                                self.straighten_box.isChecked(), self._before_change, self.result)
+        for widget in (self.all_pages, self.some_pages, self.pages_edit, self.language_combo, self.skip_box,
+                       self.straighten_box, self.start_button, self.copy_button, self.export_button):
+            widget.setEnabled(False)
+        self.copy_button.hide()
+        self.export_button.hide()
+        self.close_button.setText("Annuler")
+        self.progress.setValue(0)
+        self.progress.show()
+        self.status.setText("Préparation…")
+        QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
+        self.timer.start()
+
+    def _before_change(self):
+        self.editor.push_undo("reconnaissance de texte (OCR)")
+        self.changed = True
+
+    def _step(self):
+        """Avance la reconnaissance d'une lecture d'image au plus (environ une seconde), puis rend la main."""
+        deadline = time.perf_counter() + COMPARE_TICK
+        try:
+            while time.perf_counter() < deadline:
+                fraction, message = next(self.job)
+                self.progress.setValue(round(fraction * 1000))
+                self.status.setText(message)
+        except StopIteration:
+            self._finish(cancelled=False)
+        except OcrError as exc:
+            self._finish(cancelled=True)
+            QMessageBox.critical(self, "Reconnaissance impossible", str(exc))
+        except MemoryError:
+            self._finish(cancelled=True)
+            QMessageBox.critical(self, "Mémoire insuffisante", "La mémoire manque pour lire ces pages. Fermez "
+                                 "d'autres applications, ou lisez moins de pages à la fois.")
+        except Exception as exc:
+            self._finish(cancelled=True)
+            QMessageBox.critical(self, "Reconnaissance impossible", f"La reconnaissance de texte a échoué.\n\n{exc}")
+
+    def cancel(self):
+        if self.job is None:
+            return
+        self.job.close()  # entre deux lectures : aucune page n'est à moitié modifiée
+        self._finish(cancelled=True)
+
+    def _finish(self, cancelled):
+        self.timer.stop()
+        self.job = None
+        QApplication.restoreOverrideCursor()
+        self.progress.hide()
+        for widget in (self.all_pages, self.some_pages, self.pages_edit, self.language_combo, self.skip_box,
+                       self.straighten_box, self.start_button, self.copy_button, self.export_button):
+            widget.setEnabled(True)
+        self.close_button.setText("Fermer")
+        self.start_button.setText("Relancer")
+        has_text = bool(self.result and self.result.get("text"))
+        self.copy_button.setVisible(has_text)
+        self.export_button.setVisible(has_text)
+        if self.result is not None and "done" in self.result:
+            summary = ocr_summary(self.result, cancelled)
+            if self.changed:
+                summary += " Ctrl+Z dans la fenêtre principale annule toute l'opération."
+            self.status.setText(summary)
+        if self.changed:
+            self.editor.ocr_applied(self.result)
+
+    def reject(self):
+        if self.job is not None:
+            self.cancel()  # « Annuler » pendant la lecture : arrêt, la fenêtre reste ouverte avec le bilan
+            return
+        super().reject()
+
+    def closeEvent(self, event):
+        if self.job is not None:
+            self.cancel()
+        super().closeEvent(event)
+
+    # --- Texte reconnu ------------------------------------------------------------
+
+    def copy_text(self):
+        QApplication.clipboard().setText(ocr_export_text(self.result))
+        self.status.setText("Texte reconnu copié dans le presse-papiers.")
+
+    def export_text(self):
+        base = os.path.splitext(os.path.basename(self.editor.path))[0] if self.editor.path else "document"
+        folder = os.path.dirname(self.editor.path) if self.editor.path else ""
+        path, _ = QFileDialog.getSaveFileName(self, "Enregistrer le texte reconnu",
+                                              os.path.join(folder, f"{base} (texte).txt"), "Fichiers texte (*.txt)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8", newline="\r\n") as file:
+                file.write(ocr_export_text(self.result) + "\n")
+        except OSError as exc:
+            QMessageBox.critical(self, "Erreur", f"Impossible d'enregistrer le texte :\n{exc}")
+            return
+        self.status.setText(f"Texte enregistré dans « {os.path.basename(path)} ».")
 
 
 def make_icon_label(glyph):
