@@ -56,8 +56,8 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "PDF Toolkit 2"
-APP_VERSION = "1.3"
-APP_DATE = "7 novembre 2026"
+APP_VERSION = "1.4"
+APP_DATE = "8 novembre 2026"
 APP_AUTHOR = "Claude Code"
 APP_AUTHOR_MODEL = "Claude Opus 5.5 (révision claude-opus-5-5)"
 APP_DIRECTOR = "Yannick Buchet"
