@@ -294,5 +294,3 @@ tessdata_best (2,2 % des caractères en français, contre 3,1 % pour tessdata_fa
   [libheif](https://github.com/strukturag/libheif) et [libde265](https://github.com/strukturag/libde265)
   (struktur AG, LGPL v3) et l'encodeur [x265](https://www.x265.org/) (GPL v2 ou ultérieure), dont libheif ne peut se
   passer. Toutes ces licences sont compatibles avec l'AGPL v3 de l'application.
-- [Tesseract](https://github.com/tesseract-ocr/tesseract) et ses données de langue (Apache 2.0) pour la
-  reconnaissance de texte.
