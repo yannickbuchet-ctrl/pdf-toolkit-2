@@ -17,7 +17,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QAction, QColor, QDesktopServices, QDrag, QFont, QFontDatabase, QIcon, QImage, QKeySequence, QLinearGradient,
-    QPageLayout, QPageSize, QPainter, QPainterPath, QPen, QPixmap, QTransform,
+    QPageLayout, QPageSize, QPainter, QPainterPath, QPen, QPixmap, QTextCharFormat, QTextCursor, QTransform,
 )
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QRadioButton,
@@ -50,6 +51,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QStackedWidget,
+    QTextEdit,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -5950,13 +5952,17 @@ class OcrDialog(QDialog):
         layout.addWidget(self.status)
 
         buttons = QHBoxLayout()
+        self.view_button = QPushButton(make_icon("search"), "Voir le résultat…")
+        self.view_button.setIconSize(QSize(18, 18))
+        self.view_button.setToolTip("Ouvrir le texte reconnu, page par page, et y chercher un mot")
+        self.view_button.clicked.connect(self.show_result)
         self.copy_button = QPushButton("Copier le texte")
         self.copy_button.setToolTip("Copier dans le presse-papiers le texte reconnu, page par page")
         self.copy_button.clicked.connect(self.copy_text)
         self.export_button = QPushButton(make_icon("save"), "Enregistrer en .txt…")
         self.export_button.setIconSize(QSize(18, 18))
         self.export_button.clicked.connect(self.export_text)
-        for button in (self.copy_button, self.export_button):
+        for button in (self.view_button, self.copy_button, self.export_button):
             button.setAutoDefault(False)
             button.hide()
             buttons.addWidget(button)
@@ -5971,7 +5977,7 @@ class OcrDialog(QDialog):
         buttons.addWidget(self.close_button)
         buttons.addWidget(self.start_button)
         layout.addLayout(buttons)
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(700)  # bilan : cinq boutons sur une ligne
 
     # --- Calcul -------------------------------------------------------------------
 
@@ -5997,8 +6003,10 @@ class OcrDialog(QDialog):
         self.job = ocr_document(self.editor.doc, pages, language, self.skip_box.isChecked(),
                                 self.straighten_box.isChecked(), self._before_change, self.result)
         for widget in (self.all_pages, self.some_pages, self.pages_edit, self.language_combo, self.skip_box,
-                       self.straighten_box, self.start_button, self.copy_button, self.export_button):
+                       self.straighten_box, self.start_button, self.view_button, self.copy_button,
+                       self.export_button):
             widget.setEnabled(False)
+        self.view_button.hide()
         self.copy_button.hide()
         self.export_button.hide()
         self.close_button.setText("Annuler")
@@ -6045,11 +6053,13 @@ class OcrDialog(QDialog):
         QApplication.restoreOverrideCursor()
         self.progress.hide()
         for widget in (self.all_pages, self.some_pages, self.pages_edit, self.language_combo, self.skip_box,
-                       self.straighten_box, self.start_button, self.copy_button, self.export_button):
+                       self.straighten_box, self.start_button, self.view_button, self.copy_button,
+                       self.export_button):
             widget.setEnabled(True)
         self.close_button.setText("Fermer")
         self.start_button.setText("Relancer")
         has_text = bool(self.result and self.result.get("text"))
+        self.view_button.setVisible(has_text)
         self.copy_button.setVisible(has_text)
         self.export_button.setVisible(has_text)
         if self.result is not None and "done" in self.result:
@@ -6073,6 +6083,12 @@ class OcrDialog(QDialog):
 
     # --- Texte reconnu ------------------------------------------------------------
 
+    def show_result(self):
+        """Ferme cette fenêtre et ouvre celle du résultat, qui laisse la fenêtre principale utilisable."""
+        dialog = OcrResultDialog(self.editor, self.result)
+        self.accept()
+        dialog.show()
+
     def copy_text(self):
         QApplication.clipboard().setText(ocr_export_text(self.result))
         self.status.setText("Texte reconnu copié dans le presse-papiers.")
@@ -6091,6 +6107,177 @@ class OcrDialog(QDialog):
             QMessageBox.critical(self, "Erreur", f"Impossible d'enregistrer le texte :\n{exc}")
             return
         self.status.setText(f"Texte enregistré dans « {os.path.basename(path)} ».")
+
+
+# Lettres accentuées ramenées à leur lettre de base, une pour une (même longueur, pour garder les positions) : la
+# recherche dans le texte reconnu ignore les accents, que l'OCR lit parfois mal. unicodedata est exclu de l'exe.
+FOLD_ACCENTS = str.maketrans("àáâãäåçèéêëìíîïñòóôõöùúûüýÿÀÁÂÃÄÅÇÈÉÊËÌÍÎÏÑÒÓÔÕÖÙÚÛÜÝŸ’",
+                             "aaaaaaceeeeiiiinooooouuuuyyAAAAAACEEEEIIIINOOOOOUUUUYY'")
+
+
+def fold_text(text):
+    """Texte en minuscules et sans accents, de même longueur, pour une recherche tolérante."""
+    return text.translate(FOLD_ACCENTS).lower()
+
+
+class OcrResultDialog(QDialog):
+    """Texte reconnu par l'OCR, page par page, avec une recherche qui ignore majuscules et accents. Non modale :
+    « Montrer dans le document » fait défiler la fenêtre principale jusqu'au mot, surligné sur le scan."""
+
+    def __init__(self, editor, result):
+        super().__init__(editor)
+        self.editor = editor
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setWindowTitle("Texte reconnu")
+        self.text = ocr_export_text(result)
+        # Titre « — Page N — » de chaque page : début, fin et numéro, pour situer une occurrence.
+        self.titles = [(m.start(), m.end(), int(m.group(1)) - 1)
+                       for m in re.finditer(r"^— Page (\d+) —$", self.text, re.M)]
+        self.matches = []
+        self.current = -1
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+        row = QHBoxLayout()
+        row.addWidget(QLabel(make_icon_label("🔍")))
+        self.find_edit = QLineEdit()
+        self.find_edit.setPlaceholderText("Chercher un mot dans le texte reconnu")
+        self.find_edit.setToolTip("Les majuscules et les accents ne comptent pas. Entrée : occurrence suivante ; "
+                                  "Maj+Entrée : précédente.")
+        self.find_edit.setClearButtonEnabled(True)
+        self.find_edit.textChanged.connect(self.update_search)
+        self.find_edit.installEventFilter(self)
+        row.addWidget(self.find_edit, 1)
+        for icon, tip, delta in (("previous", "Occurrence précédente (Maj+Entrée)", -1),
+                                 ("next", "Occurrence suivante (Entrée)", 1)):
+            button = QPushButton(make_icon(icon), "")
+            button.setIconSize(QSize(18, 18))
+            button.setToolTip(tip)
+            button.setAutoDefault(False)
+            button.clicked.connect(lambda _checked=False, d=delta: self.step(d))
+            row.addWidget(button)
+        self.count_label = QLabel()
+        self.count_label.setMinimumWidth(130)
+        row.addWidget(self.count_label)
+        layout.addLayout(row)
+
+        self.view = QPlainTextEdit(self.text)
+        self.view.setReadOnly(True)
+        self.view.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse
+                                          | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+        font = self.view.font()
+        font.setPointSizeF(font.pointSizeF() + 1)
+        self.view.setFont(font)
+        layout.addWidget(self.view, 1)
+
+        buttons = QHBoxLayout()
+        self.show_button = QPushButton("Montrer dans le document")
+        self.show_button.setToolTip("Faire défiler le document jusqu'à cette occurrence, surlignée sur le scan")
+        self.show_button.setAutoDefault(False)
+        self.show_button.clicked.connect(self.show_in_document)
+        buttons.addWidget(self.show_button)
+        copy_button = QPushButton("Copier le texte")
+        copy_button.setToolTip("Copier dans le presse-papiers tout le texte reconnu")
+        copy_button.setAutoDefault(False)
+        copy_button.clicked.connect(self.copy_text)
+        buttons.addWidget(copy_button)
+        buttons.addStretch()
+        close_button = QPushButton("Fermer")
+        close_button.setAutoDefault(False)
+        close_button.clicked.connect(self.close)
+        buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+        self.resize(700, 640)
+        self.update_search()
+        self.find_edit.setFocus()
+
+    def eventFilter(self, watched, event):
+        if (watched is self.find_edit and event.type() == QEvent.Type.KeyPress
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)):
+            self.step(-1 if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else 1)
+            return True
+        return super().eventFilter(watched, event)
+
+    def page_of(self, position):
+        """Numéro (à partir de 0) de la page où se trouve cette position du texte affiché."""
+        page = self.titles[0][2] if self.titles else 0
+        for start, _end, index in self.titles:
+            if start > position:
+                break
+            page = index
+        return page
+
+    def update_search(self):
+        needle = fold_text(self.find_edit.text().strip())
+        self.matches = []
+        if needle:
+            haystack = fold_text(self.text)
+            position = haystack.find(needle)
+            while position >= 0:
+                # Les titres « — Page N — » ne comptent pas.
+                if not any(start <= position < end for start, end, _index in self.titles):
+                    self.matches.append((position, position + len(needle)))
+                position = haystack.find(needle, position + 1)
+        self.current = 0 if self.matches else -1
+        self._show()
+
+    def step(self, delta):
+        if self.matches:
+            self.current = (self.current + delta) % len(self.matches)
+            self._show()
+
+    def _show(self):
+        light = QTextCharFormat()
+        light.setBackground(QColor("#fde68a"))
+        strong = QTextCharFormat()
+        strong.setBackground(QColor("#f97316"))
+        strong.setForeground(QColor("white"))
+        selections = []
+        for number, (start, end) in enumerate(self.matches):
+            selection = QTextEdit.ExtraSelection()
+            cursor = QTextCursor(self.view.document())
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+            selection.cursor = cursor
+            selection.format = strong if number == self.current else light
+            selections.append(selection)
+        self.view.setExtraSelections(selections)
+        if not self.find_edit.text().strip():
+            self.count_label.setText("")
+        elif not self.matches:
+            self.count_label.setText("Aucun résultat")
+        else:
+            start, _end = self.matches[self.current]
+            self.count_label.setText(f"{self.current + 1} sur {len(self.matches)} · page {self.page_of(start) + 1}")
+            cursor = QTextCursor(self.view.document())
+            cursor.setPosition(start)
+            self.view.setTextCursor(cursor)
+            self.view.centerCursor()
+        self.show_button.setEnabled(bool(self.matches))
+
+    def show_in_document(self):
+        """Ouvre la recherche de la fenêtre principale sur ce mot et va à la même occurrence de la même page."""
+        editor = self.editor
+        if not self.matches or editor.doc is None:
+            return
+        start, end = self.matches[self.current]
+        page = self.page_of(start)
+        rank = sum(1 for other, _end in self.matches[:self.current] if self.page_of(other) == page)
+        editor.search_bar.case_box.setChecked(False)
+        editor.search_bar.find_edit.setText(self.text[start:end])
+        editor.show_search()
+        on_page = [i for i, match in enumerate(editor.matches) if match[0] == page]
+        if on_page:
+            editor.match_index = on_page[min(rank, len(on_page) - 1)]
+            editor._show_matches(scroll=True)
+        elif 0 <= page < len(editor.pages):
+            editor.go_to_page(page)
+        editor.raise_()
+        editor.activateWindow()
+
+    def copy_text(self):
+        QApplication.clipboard().setText(self.text)
+        self.count_label.setText("Texte copié.")
 
 
 def make_icon_label(glyph):

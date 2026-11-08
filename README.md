@@ -48,7 +48,10 @@ avec le moteur Tesseract intégré à l'application.
 - La progression s'affiche page par page. **Annuler** arrête la lecture à la fin de la page en cours : les pages
   déjà lues gardent leur texte, et relancer l'OCR reprend où elle s'était arrêtée. **Ctrl+Z** annule toute
   l'opération d'un coup.
-- À la fin, **Copier le texte** ou **Enregistrer en .txt** le texte reconnu, page par page.
+- À la fin, **Voir le résultat…** ouvre le texte reconnu, page par page, dans une fenêtre où **chercher un mot**
+  (sans tenir compte des majuscules ni des accents ; Entrée et Maj+Entrée passent d'une occurrence à l'autre).
+  **Montrer dans le document** fait défiler le PDF jusqu'au mot, surligné sur le scan. Le texte reconnu peut aussi
+  être **copié** ou **enregistré en .txt**.
 - En mode édition, le texte reconnu, encadré en pointillés gris, **ne se modifie pas** : il est invisible, et un texte
   réécrit s'afficherait par-dessus l'image. « Rechercher et remplacer » le laisse aussi tel quel. Pour le corriger,
   refaites l'OCR de la page.

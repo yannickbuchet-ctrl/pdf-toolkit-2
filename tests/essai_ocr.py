@@ -394,6 +394,43 @@ def essai_interface(chemin):
     copie = QApplication.clipboard().text()
     verifier(copie.startswith("— Page 1 —") and "séance" in copie and "œufs" in copie, "texte copié incomplet")
     verifier([label for label, *_ in editeur.undo_stack] == ["reconnaissance de texte (OCR)"], "une seule annulation attendue")
+
+    # « Voir le résultat… » : texte reconnu page par page, recherche sans accents ni majuscules, puis le mot montré
+    # dans le document.
+    verifier(fenetre.view_button.isVisible(), "bouton « Voir le résultat… » absent")
+    fenetre.show_result()
+    app.processEvents()
+    resultat = next(w for w in QApplication.topLevelWidgets() if isinstance(w, main.OcrResultDialog))
+    verifier(resultat.isVisible() and not fenetre.isVisible(), "fenêtre du résultat non ouverte")
+    verifier(resultat.view.toPlainText() == copie, "le résultat ne montre pas le texte reconnu")
+    resultat.find_edit.setText("SEANCE")
+    app.processEvents()
+    verifier(len(resultat.matches) == 2, f"résultat, « SEANCE » : {len(resultat.matches)} occurrence(s)")
+    verifier(resultat.count_label.text() == "1 sur 2 · page 1", f"compteur : {resultat.count_label.text()}")
+    from PySide6.QtGui import QKeyEvent
+    for modificateur, attendu in ((Qt.KeyboardModifier.NoModifier, 1), (Qt.KeyboardModifier.ShiftModifier, 0)):
+        QApplication.sendEvent(resultat.find_edit, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Return, modificateur))
+        verifier(resultat.current == attendu, f"Entrée / Maj+Entrée : occurrence {resultat.current}")
+    resultat.find_edit.setText("page")
+    verifier(not resultat.matches, "les titres « — Page N — » ne doivent pas compter")
+    resultat.find_edit.setText("Lyon")
+    page_lyon = resultat.page_of(resultat.matches[0][0]) if resultat.matches else -1
+    verifier(page_lyon > 0, f"« Lyon » : page {page_lyon + 1}")
+    resultat.find_edit.setText("seance")
+    resultat.step(1)
+    app.processEvents()
+    resultat.grab().save(os.path.join(SORTIE, "fenetre-resultat.png"))
+    resultat.show_in_document()
+    app.processEvents()
+    verifier(not editeur.search_bar.isHidden() and len(editeur.matches) == 2 and editeur.match_index == 1,
+             f"« Montrer dans le document » : {len(editeur.matches)} occurrence(s), n° {editeur.match_index}")
+    editeur.grab().save(os.path.join(SORTIE, "resultat-dans-document.png"))
+    resultat.find_edit.setText("Lyon")
+    resultat.show_in_document()
+    verifier(editeur.matches and editeur.matches[editeur.match_index][0] == page_lyon, "« Lyon » : mauvaise page")
+    resultat.close()
+    app.processEvents()
+    editeur.search_bar.close_bar()
     fenetre.close()
 
     editeur.show_search()
