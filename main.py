@@ -656,6 +656,42 @@ def is_ocr_span(span):
     return span.get("alpha", 255) == 0 or "GlyphLessFont" in span["font"]
 
 
+def same_span_style(a, b):
+    return (a["font"] == b["font"] and abs(a["size"] - b["size"]) < 0.05 and a["color"] == b["color"]
+            and a["flags"] == b["flags"])
+
+
+def join_word_spans(spans):
+    """Réunit les mots écrits un par un sur une même ligne.
+
+    Certains logiciels (pages web imprimées en PDF, par exemple) placent chaque mot, voire chaque ligature, à part :
+    PyMuPDF en fait autant de lignes, et le mode édition affichait une petite zone par mot. Un fragment qui suit le
+    précédent sur la même ligne de base, dans le même style et à moins d'un cadratin, lui est ajouté ; l'espace qui
+    manque entre deux mots est rétablie. Les colonnes (grand écart) et les changements de style restent séparés.
+    """
+    joined = []
+    for span in spans:
+        last = joined[-1] if joined else None
+        if (last is not None and not span["ocr"] and not last["ocr"] and span["horizontal"] and last["horizontal"]
+                and same_span_style(span, last)):
+            size = last["size"]
+            gap = span["bbox"][0] - last["bbox"][2]
+            if abs(span["origin"][1] - last["origin"][1]) < 0.2 * size and -0.1 * size < gap < size:
+                chars = list(last["chars"])
+                if gap > 0.15 * size and not last["text"].endswith(" ") and not span["text"].startswith(" "):
+                    x0, x1 = last["bbox"][2], span["bbox"][0]
+                    chars.append({"c": " ", "origin": (x0, last["origin"][1]),
+                                  "bbox": (x0, last["bbox"][1], x1, last["bbox"][3])})
+                last = dict(last)
+                last["chars"] = chars + list(span["chars"])
+                last["text"] = "".join(ch["c"] for ch in last["chars"])
+                last["bbox"] = tuple(pymupdf.Rect(last["bbox"]) | pymupdf.Rect(span["bbox"]))
+                joined[-1] = last
+                continue
+        joined.append(span)
+    return joined
+
+
 def page_spans(page):
     """Renvoie les fragments de texte (spans) non vides de la page.
 
@@ -684,7 +720,10 @@ def page_spans(page):
                     last["bbox"] = tuple(pymupdf.Rect(last["bbox"]) | pymupdf.Rect(span["bbox"]))
                 else:
                     merged.append(span)
+            for span in merged:
+                span["horizontal"] = abs(line["dir"][0] - 1) < 1e-3 and abs(line["dir"][1]) < 1e-3
             spans += [span for span in merged if span["text"].strip()]
+    spans = join_word_spans(spans)
     for span in spans:
         span["matrix"] = page.rotation_matrix
         span["view"] = tuple(pymupdf.Rect(span["bbox"]) * page.rotation_matrix)
