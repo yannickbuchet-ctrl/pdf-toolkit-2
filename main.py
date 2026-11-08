@@ -6145,8 +6145,8 @@ FEATURES = [
      "images, pages en plus ou en moins. Exportez un rapport PDF des différences.",
      "Ctrl+Maj+C"),
     ("ocr", "Reconnaissance de texte (OCR)",
-     "Rendez un PDF scanné cherchable, et son texte sélectionnable et copiable : le texte lu sur l'image est posé, "
-     "invisible, sur chaque page. Tout se fait sur cet ordinateur.",
+     "Le texte d'un PDF scanné est lu sur l'image et posé, invisible, sur chaque page : il se cherche, se sélectionne "
+     "et se copie. Tout se fait sur cet ordinateur.",
      "Ctrl+Maj+O"),
 ]
 

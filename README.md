@@ -1,9 +1,9 @@
 # PDF Toolkit 2
 
-Un éditeur de PDF simple et en français pour Windows : modifier le texte, assembler et organiser les pages,
-remplir les formulaires, signer, comparer deux versions d'un document ou d'un plan, rendre un document scanné
-cherchable (reconnaissance de texte), créer des planches de photos d'identité, protéger par mot de passe et
-compresser vos documents. Tout se passe sur votre ordinateur : aucun document n'est envoyé sur Internet.
+Un éditeur de PDF simple et en français pour Windows : modifier le texte, assembler et organiser les pages, remplir
+les formulaires, signer, comparer deux versions d'un document ou d'un plan, lire le texte des documents scannés
+(reconnaissance de texte, OCR), créer des planches de photos d'identité, protéger par mot de passe et compresser vos
+documents. Tout se passe sur votre ordinateur : aucun document n'est envoyé sur Internet.
 
 ![PDF Toolkit 2 : recherche et remplacement dans un document](captures/fenetre.png)
 
@@ -31,7 +31,7 @@ compresser vos documents. Tout se passe sur votre ordinateur : aucun document n'
   une fois installée, elle est prise en compte sans redémarrer.
 - **Rechercher et remplacer** (Ctrl+H) : remplacement une par une ou de toutes les occurrences en une fois.
 
-### Rendre un scan cherchable (OCR)
+### Reconnaissance de texte (OCR)
 
 Édition → **Reconnaissance de texte (OCR)** (Ctrl+Maj+O, bouton « OCR »). Le texte des pages scannées est lu sur
 l'image, puis posé dessus en **calque invisible**, mot par mot, à la place de chaque mot : la page garde son aspect,
